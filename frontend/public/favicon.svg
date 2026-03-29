@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="gTop" x1="64" y1="6" x2="64" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#39D8A5" />
+      <stop offset="1" stop-color="#0D547D" />
+    </linearGradient>
+    <linearGradient id="gTopRight" x1="78" y1="18" x2="112" y2="62" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B8F15F" />
+      <stop offset="1" stop-color="#2D9B5C" />
+    </linearGradient>
+    <linearGradient id="gBottomRight" x1="78" y1="64" x2="108" y2="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B7A62" />
+      <stop offset="1" stop-color="#133C68" />
+    </linearGradient>
+    <linearGradient id="gBottom" x1="64" y1="58" x2="64" y2="118" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#46D6E9" />
+      <stop offset="1" stop-color="#2A5ED6" />
+    </linearGradient>
+    <linearGradient id="gBottomLeft" x1="14" y1="64" x2="52" y2="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1C3AAE" />
+      <stop offset="1" stop-color="#0D275F" />
+    </linearGradient>
+    <linearGradient id="gTopLeft" x1="12" y1="18" x2="50" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#52C7FF" />
+      <stop offset="1" stop-color="#274EBA" />
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="128" height="128" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#123048" flood-opacity="0.18" />
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <polygon points="64,8 87,21 87,47 64,60 41,47 41,21" fill="url(#gTop)" />
+    <polygon points="88,22 111,35 111,61 88,74 65,61 65,35" fill="url(#gTopRight)" />
+    <polygon points="88,54 111,67 111,93 88,106 65,93 65,67" fill="url(#gBottomRight)" />
+    <polygon points="64,68 87,81 87,107 64,120 41,107 41,81" fill="url(#gBottom)" />
+    <polygon points="40,54 63,67 63,93 40,106 17,93 17,67" fill="url(#gBottomLeft)" />
+    <polygon points="40,22 63,35 63,61 40,74 17,61 17,35" fill="url(#gTopLeft)" />
+
+    <polygon points="64,18 80,27 80,44 64,53 48,44 48,27" fill="#0B355F" fill-opacity="0.24" />
+    <polygon points="95,39 103,44 103,58 95,63 87,58 87,44" fill="#0C3556" fill-opacity="0.18" />
+    <polygon points="95,70 103,75 103,88 95,93 87,88 87,75" fill="#0C3556" fill-opacity="0.18" />
+    <polygon points="64,74 80,83 80,100 64,109 48,100 48,83" fill="#0B355F" fill-opacity="0.18" />
+    <polygon points="33,70 41,75 41,88 33,93 25,88 25,75" fill="#081F4A" fill-opacity="0.18" />
+    <polygon points="33,39 41,44 41,58 33,63 25,58 25,44" fill="#082B60" fill-opacity="0.18" />
+  </g>
+
+  <path d="M64 25 L95 43 L95 79 L64 97 L33 79 L33 43 Z" stroke="white" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="64" cy="25" r="5.5" fill="white" />
+  <circle cx="95" cy="43" r="5.5" fill="white" />
+  <circle cx="95" cy="79" r="5.5" fill="white" />
+  <circle cx="64" cy="97" r="5.5" fill="white" />
+  <circle cx="33" cy="79" r="5.5" fill="white" />
+  <circle cx="33" cy="43" r="5.5" fill="white" />
+  <circle cx="64" cy="43" r="5" fill="white" />
+  <path d="M64 25V43M33 43H64M64 43H95" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+
+  <polygon points="64,44 80,53 80,71 64,80 48,71 48,53" fill="white" />
+
+  <circle cx="26" cy="25" r="1.6" fill="white" fill-opacity="0.85" />
+  <circle cx="103" cy="28" r="1.8" fill="white" fill-opacity="0.8" />
+  <circle cx="18" cy="53" r="1.7" fill="white" fill-opacity="0.7" />
+  <circle cx="109" cy="91" r="1.9" fill="white" fill-opacity="0.72" />
+  <circle cx="54" cy="17" r="1.4" fill="white" fill-opacity="0.7" />
+  <circle cx="74" cy="18" r="1.4" fill="white" fill-opacity="0.7" />
+</svg>
