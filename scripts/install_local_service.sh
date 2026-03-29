@@ -8,6 +8,7 @@ LEGACY_RUNTIME_ROOT_DEFAULT="$HOME/Library/Application Support/KubeFleet"
 RUNTIME_ROOT="${KUBEFEEL_RUNTIME_ROOT:-${KUBEFLEET_RUNTIME_ROOT:-$NEW_RUNTIME_ROOT_DEFAULT}}"
 RUNTIME_BIN_DIR="$RUNTIME_ROOT/bin"
 RUNTIME_FRONTEND_DIR="$RUNTIME_ROOT/frontend-dist"
+RUNTIME_CHART_DIR="$RUNTIME_ROOT/charts"
 RUNTIME_DB_PATH="$RUNTIME_ROOT/app.db"
 RUNTIME_SECRET_DIR="$RUNTIME_ROOT/secrets"
 JWT_SECRET_FILE="$RUNTIME_SECRET_DIR/jwt_secret"
@@ -15,10 +16,14 @@ ENCRYPTION_SECRET_FILE="$RUNTIME_SECRET_DIR/encryption_secret"
 BOOTSTRAP_ADMIN_PASSWORD_FILE="$RUNTIME_SECRET_DIR/bootstrap_admin_password"
 PLIST_PATH="$HOME/Library/LaunchAgents/io.kubefeel.server.plist"
 LEGACY_PLIST_PATH="$HOME/Library/LaunchAgents/io.kubefleet.server.plist"
+LEGACY_COMPANY_PLIST_PATH="$HOME/Library/LaunchAgents/com.bertreyking.kubefeel-server.plist"
+LEGACY_COMPANY_FLEET_PLIST_PATH="$HOME/Library/LaunchAgents/com.bertreyking.kubefleet-server.plist"
 LOG_DIR="$HOME/Library/Logs"
 UID_VALUE="$(id -u)"
 LABEL="io.kubefeel.server"
 LEGACY_LABEL="io.kubefleet.server"
+LEGACY_COMPANY_LABEL="com.bertreyking.kubefeel-server"
+LEGACY_COMPANY_FLEET_LABEL="com.bertreyking.kubefleet-server"
 BINARY_NAME="kubefeel-server"
 LEGACY_DB_PATH="$LEGACY_RUNTIME_ROOT_DEFAULT/app.db"
 
@@ -45,7 +50,39 @@ PY
   chmod 600 "$file_path"
 }
 
-mkdir -p "$RUNTIME_BIN_DIR" "$RUNTIME_FRONTEND_DIR" "$RUNTIME_SECRET_DIR" "$(dirname "$PLIST_PATH")" "$LOG_DIR"
+read_plist_env() {
+  local plist_path="$1"
+  local key="$2"
+  if [[ ! -f "$plist_path" ]]; then
+    return
+  fi
+
+  /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist_path" 2>/dev/null || true
+}
+
+migrate_secret_from_legacy_plists() {
+  local target_file="$1"
+  local env_key="$2"
+  shift 2
+
+  if [[ -s "$target_file" ]]; then
+    return
+  fi
+
+  local value=""
+  local plist_path
+  for plist_path in "$@"; do
+    value="$(read_plist_env "$plist_path" "$env_key")"
+    if [[ -n "$value" ]]; then
+      mkdir -p "$(dirname "$target_file")"
+      printf '%s' "$value" >"$target_file"
+      chmod 600 "$target_file"
+      return
+    fi
+  done
+}
+
+mkdir -p "$RUNTIME_BIN_DIR" "$RUNTIME_FRONTEND_DIR" "$RUNTIME_CHART_DIR" "$RUNTIME_SECRET_DIR" "$(dirname "$PLIST_PATH")" "$LOG_DIR"
 
 cd "$WORKSPACE_DIR/frontend"
 npm run build
@@ -53,12 +90,32 @@ npm run build
 cd "$WORKSPACE_DIR"
 go build -o "$RUNTIME_BIN_DIR/$BINARY_NAME" ./cmd/server
 rsync -a --delete "$WORKSPACE_DIR/frontend/dist/" "$RUNTIME_FRONTEND_DIR/"
+rsync -a --delete "$WORKSPACE_DIR/charts/" "$RUNTIME_CHART_DIR/"
 
 if [[ ! -f "$RUNTIME_DB_PATH" && -f "$LEGACY_DB_PATH" ]]; then
   sqlite3 "$LEGACY_DB_PATH" ".backup '$RUNTIME_DB_PATH'"
 elif [[ ! -f "$RUNTIME_DB_PATH" && -f "$WORKSPACE_DIR/app.db" ]]; then
   sqlite3 "$WORKSPACE_DIR/app.db" ".backup '$RUNTIME_DB_PATH'"
 fi
+
+migrate_secret_from_legacy_plists \
+  "$JWT_SECRET_FILE" \
+  "APP_JWT_SECRET" \
+  "$LEGACY_COMPANY_PLIST_PATH" \
+  "$LEGACY_COMPANY_FLEET_PLIST_PATH" \
+  "$LEGACY_PLIST_PATH"
+migrate_secret_from_legacy_plists \
+  "$ENCRYPTION_SECRET_FILE" \
+  "APP_ENCRYPTION_SECRET" \
+  "$LEGACY_COMPANY_PLIST_PATH" \
+  "$LEGACY_COMPANY_FLEET_PLIST_PATH" \
+  "$LEGACY_PLIST_PATH"
+migrate_secret_from_legacy_plists \
+  "$BOOTSTRAP_ADMIN_PASSWORD_FILE" \
+  "APP_BOOTSTRAP_ADMIN_PASSWORD" \
+  "$LEGACY_COMPANY_PLIST_PATH" \
+  "$LEGACY_COMPANY_FLEET_PLIST_PATH" \
+  "$LEGACY_PLIST_PATH"
 
 ensure_secret_file "$JWT_SECRET_FILE" 32
 ensure_secret_file "$ENCRYPTION_SECRET_FILE" 32
@@ -109,8 +166,12 @@ cat >"$PLIST_PATH" <<EOF
 EOF
 
 launchctl bootout "gui/$UID_VALUE/$LEGACY_LABEL" >/dev/null 2>&1 || true
+launchctl bootout "gui/$UID_VALUE/$LEGACY_COMPANY_LABEL" >/dev/null 2>&1 || true
+launchctl bootout "gui/$UID_VALUE/$LEGACY_COMPANY_FLEET_LABEL" >/dev/null 2>&1 || true
 launchctl bootout "gui/$UID_VALUE/$LABEL" >/dev/null 2>&1 || true
 rm -f "$LEGACY_PLIST_PATH"
+rm -f "$LEGACY_COMPANY_PLIST_PATH"
+rm -f "$LEGACY_COMPANY_FLEET_PLIST_PATH"
 launchctl bootstrap "gui/$UID_VALUE" "$PLIST_PATH"
 launchctl kickstart -k "gui/$UID_VALUE/$LABEL"
 

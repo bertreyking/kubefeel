@@ -13,6 +13,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,86 @@ type observabilitySourcePayload struct {
 type grafanaSessionCacheEntry struct {
 	cookieHeader string
 	expiresAt    time.Time
+}
+
+type grafanaSearchItem struct {
+	ID          int      `json:"id"`
+	UID         string   `json:"uid"`
+	Title       string   `json:"title"`
+	Type        string   `json:"type"`
+	URL         string   `json:"url"`
+	FolderID    int      `json:"folderId"`
+	FolderUID   string   `json:"folderUid"`
+	FolderTitle string   `json:"folderTitle"`
+	Tags        []string `json:"tags"`
+	IsStarred   bool     `json:"isStarred"`
+}
+
+type grafanaCatalogFolder struct {
+	UID            string                    `json:"uid"`
+	Title          string                    `json:"title"`
+	IsGeneral      bool                      `json:"isGeneral"`
+	DashboardCount int                       `json:"dashboardCount"`
+	Dashboards     []grafanaCatalogDashboard `json:"dashboards"`
+}
+
+type grafanaCatalogDashboard struct {
+	UID         string   `json:"uid"`
+	Title       string   `json:"title"`
+	URL         string   `json:"url"`
+	FolderUID   string   `json:"folderUid"`
+	FolderTitle string   `json:"folderTitle"`
+	Tags        []string `json:"tags"`
+	IsStarred   bool     `json:"isStarred"`
+}
+
+type grafanaFolderPayload struct {
+	Title string `json:"title"`
+}
+
+type grafanaDashboardPayload struct {
+	Title      string   `json:"title"`
+	FolderUID  string   `json:"folderUid"`
+	Tags       []string `json:"tags"`
+	Definition string   `json:"definition"`
+}
+
+type grafanaFolderResponse struct {
+	ID    int    `json:"id"`
+	UID   string `json:"uid"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+type grafanaFolderDetailResponse struct {
+	ID      int    `json:"id"`
+	UID     string `json:"uid"`
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Version int    `json:"version"`
+}
+
+type grafanaDashboardCreateResponse struct {
+	ID      int    `json:"id"`
+	UID     string `json:"uid"`
+	URL     string `json:"url"`
+	Status  string `json:"status"`
+	Slug    string `json:"slug"`
+	Version int    `json:"version"`
+}
+
+type grafanaDashboardDetailResponse struct {
+	Dashboard map[string]any `json:"dashboard"`
+	Meta      struct {
+		FolderUID   string `json:"folderUid"`
+		FolderTitle string `json:"folderTitle"`
+		URL         string `json:"url"`
+		Slug        string `json:"slug"`
+		Provisioned bool   `json:"provisioned"`
+		CanSave     bool   `json:"canSave"`
+		CanEdit     bool   `json:"canEdit"`
+		CanDelete   bool   `json:"canDelete"`
+	} `json:"meta"`
 }
 
 var (
@@ -260,6 +341,513 @@ func (s *Server) deleteObservabilitySource(c *gin.Context) {
 	}
 
 	s.clearGrafanaSessionCache(identifier)
+
+	respondNoContent(c)
+}
+
+func (s *Server) listGrafanaCatalog(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录加载失败: %v", err))
+		return
+	}
+
+	items, err := listGrafanaSearchItems(c.Request.Context(), endpoint, sessionCookieHeader)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录加载失败: %v", err))
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
+
+	folders, dashboardCount := buildGrafanaCatalog(items)
+
+	respondData(c, http.StatusOK, gin.H{
+		"folders":        folders,
+		"folderCount":    len(folders),
+		"dashboardCount": dashboardCount,
+		"loadedAt":       time.Now(),
+	})
+}
+
+func (s *Server) createGrafanaFolder(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	var input grafanaFolderPayload
+	if err := c.ShouldBindJSON(&input); err != nil {
+		respondError(c, http.StatusBadRequest, "invalid grafana folder payload")
+		return
+	}
+
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		respondError(c, http.StatusBadRequest, "目录名称不能为空")
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录创建失败: %v", err))
+		return
+	}
+
+	payload := map[string]any{
+		"title": title,
+	}
+
+	var response grafanaFolderResponse
+	if err := doGrafanaJSONRequest(
+		c.Request.Context(),
+		endpoint,
+		sessionCookieHeader,
+		http.MethodPost,
+		"/api/folders",
+		payload,
+		&response,
+	); err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录创建失败: %v", err))
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
+
+	respondData(c, http.StatusCreated, gin.H{
+		"id":    response.ID,
+		"uid":   response.UID,
+		"title": response.Title,
+		"url":   response.URL,
+	})
+}
+
+func (s *Server) updateGrafanaFolder(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	folderUID := normalizeGrafanaFolderUID(c.Param("folderUid"))
+	if folderUID == "" {
+		respondError(c, http.StatusBadRequest, "默认目录不支持重命名")
+		return
+	}
+
+	var input grafanaFolderPayload
+	if err := c.ShouldBindJSON(&input); err != nil {
+		respondError(c, http.StatusBadRequest, "invalid grafana folder payload")
+		return
+	}
+
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		respondError(c, http.StatusBadRequest, "目录名称不能为空")
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录更新失败: %v", err))
+		return
+	}
+
+	folderDetail, err := getGrafanaFolderDetail(c.Request.Context(), endpoint, sessionCookieHeader, folderUID)
+	if err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录更新失败: %v", err))
+		return
+	}
+
+	var response grafanaFolderResponse
+	if err := doGrafanaJSONRequest(
+		c.Request.Context(),
+		endpoint,
+		sessionCookieHeader,
+		http.MethodPut,
+		"/api/folders/"+folderUID,
+		map[string]any{
+			"title":     title,
+			"version":   folderDetail.Version,
+			"overwrite": true,
+		},
+		&response,
+	); err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录更新失败: %v", err))
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
+
+	respondData(c, http.StatusOK, gin.H{
+		"id":    response.ID,
+		"uid":   response.UID,
+		"title": response.Title,
+		"url":   response.URL,
+	})
+}
+
+func (s *Server) deleteGrafanaFolder(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	folderUID := normalizeGrafanaFolderUID(c.Param("folderUid"))
+	if folderUID == "" {
+		respondError(c, http.StatusBadRequest, "默认目录不支持删除")
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录删除失败: %v", err))
+		return
+	}
+
+	items, err := listGrafanaSearchItems(c.Request.Context(), endpoint, sessionCookieHeader)
+	if err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录删除失败: %v", err))
+		return
+	}
+	for _, item := range items {
+		if item.Type == "dash-db" && strings.TrimSpace(item.FolderUID) == folderUID {
+			respondError(c, http.StatusBadRequest, "目录下仍有仪表盘，请先迁移或删除目录内仪表盘")
+			return
+		}
+	}
+
+	if err := doGrafanaJSONRequest(
+		c.Request.Context(),
+		endpoint,
+		sessionCookieHeader,
+		http.MethodDelete,
+		"/api/folders/"+folderUID,
+		nil,
+		nil,
+	); err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录删除失败: %v", err))
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
+
+	respondNoContent(c)
+}
+
+func (s *Server) createGrafanaDashboard(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	var input grafanaDashboardPayload
+	if err := c.ShouldBindJSON(&input); err != nil {
+		respondError(c, http.StatusBadRequest, "invalid grafana dashboard payload")
+		return
+	}
+
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		respondError(c, http.StatusBadRequest, "仪表盘名称不能为空")
+		return
+	}
+
+	dashboard, err := buildGrafanaDashboardDefinition(title, input.Tags, input.Definition)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘创建失败: %v", err))
+		return
+	}
+
+	requestBody := map[string]any{
+		"dashboard": dashboard,
+		"overwrite": false,
+		"message":   "created via KubeFeel",
+	}
+
+	if folderUID := normalizeGrafanaFolderUID(input.FolderUID); folderUID != "" {
+		requestBody["folderUid"] = folderUID
+	}
+
+	var response grafanaDashboardCreateResponse
+	if err := doGrafanaJSONRequest(
+		c.Request.Context(),
+		endpoint,
+		sessionCookieHeader,
+		http.MethodPost,
+		"/api/dashboards/db",
+		requestBody,
+		&response,
+	); err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘创建失败: %v", err))
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
+
+	respondData(c, http.StatusCreated, gin.H{
+		"id":        response.ID,
+		"uid":       response.UID,
+		"url":       response.URL,
+		"status":    response.Status,
+		"version":   response.Version,
+		"title":     title,
+		"folderUid": normalizeGrafanaFolderUID(input.FolderUID),
+		"tags":      normalizeGrafanaTags(input.Tags),
+	})
+}
+
+func (s *Server) getGrafanaDashboardMeta(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	dashboardUID := strings.TrimSpace(c.Param("dashboardUid"))
+	if dashboardUID == "" {
+		respondError(c, http.StatusBadRequest, "invalid dashboard uid")
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘信息加载失败: %v", err))
+		return
+	}
+
+	dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
+	if err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘信息加载失败: %v", err))
+		return
+	}
+	if dashboardDetail.Dashboard == nil {
+		respondError(c, http.StatusBadGateway, "Grafana 仪表盘信息加载失败: 仪表盘内容为空")
+		return
+	}
+
+	title, _ := dashboardDetail.Dashboard["title"].(string)
+	tags := stringifyGrafanaTags(dashboardDetail.Dashboard["tags"])
+	definition, err := serializeGrafanaDashboardDefinition(dashboardDetail.Dashboard)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "序列化 Grafana 仪表盘失败")
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
+
+	respondData(c, http.StatusOK, gin.H{
+		"uid":         dashboardUID,
+		"title":       title,
+		"url":         dashboardDetail.Meta.URL,
+		"folderUid":   dashboardDetail.Meta.FolderUID,
+		"folderTitle": dashboardDetail.Meta.FolderTitle,
+		"tags":        tags,
+		"provisioned": dashboardDetail.Meta.Provisioned,
+		"canSave":     dashboardDetail.Meta.CanSave && dashboardDetail.Meta.CanEdit,
+		"canDelete":   dashboardDetail.Meta.CanDelete,
+		"definition":  definition,
+	})
+}
+
+func (s *Server) updateGrafanaDashboard(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	dashboardUID := strings.TrimSpace(c.Param("dashboardUid"))
+	if dashboardUID == "" {
+		respondError(c, http.StatusBadRequest, "invalid dashboard uid")
+		return
+	}
+
+	var input grafanaDashboardPayload
+	if err := c.ShouldBindJSON(&input); err != nil {
+		respondError(c, http.StatusBadRequest, "invalid grafana dashboard payload")
+		return
+	}
+
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		respondError(c, http.StatusBadRequest, "仪表盘名称不能为空")
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘更新失败: %v", err))
+		return
+	}
+
+	dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
+	if err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘更新失败: %v", err))
+		return
+	}
+	if dashboardDetail.Dashboard == nil {
+		respondError(c, http.StatusBadGateway, "Grafana 仪表盘更新失败: 仪表盘内容为空")
+		return
+	}
+	if dashboardDetail.Meta.Provisioned || !dashboardDetail.Meta.CanSave || !dashboardDetail.Meta.CanEdit {
+		respondError(c, http.StatusBadRequest, "当前仪表盘处于只读保护状态，不能直接修改；请先保存为自定义副本后再调整目录或标题")
+		return
+	}
+
+	dashboardDetail.Dashboard["title"] = title
+	dashboardDetail.Dashboard["tags"] = normalizeGrafanaTags(input.Tags)
+
+	requestBody := map[string]any{
+		"dashboard": dashboardDetail.Dashboard,
+		"overwrite": true,
+		"message":   "updated via KubeFeel",
+	}
+
+	if folderUID := normalizeGrafanaFolderUID(input.FolderUID); folderUID != "" {
+		requestBody["folderUid"] = folderUID
+	} else {
+		requestBody["folderId"] = 0
+	}
+
+	var response grafanaDashboardCreateResponse
+	if err := doGrafanaJSONRequest(
+		c.Request.Context(),
+		endpoint,
+		sessionCookieHeader,
+		http.MethodPost,
+		"/api/dashboards/db",
+		requestBody,
+		&response,
+	); err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘更新失败: %v", err))
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
+
+	respondData(c, http.StatusOK, gin.H{
+		"id":        response.ID,
+		"uid":       response.UID,
+		"url":       response.URL,
+		"status":    response.Status,
+		"version":   response.Version,
+		"title":     title,
+		"folderUid": normalizeGrafanaFolderUID(input.FolderUID),
+		"tags":      normalizeGrafanaTags(input.Tags),
+	})
+}
+
+func (s *Server) deleteGrafanaDashboard(c *gin.Context) {
+	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
+	if err != nil {
+		return
+	}
+
+	dashboardUID := strings.TrimSpace(c.Param("dashboardUid"))
+	if dashboardUID == "" {
+		respondError(c, http.StatusBadRequest, "invalid dashboard uid")
+		return
+	}
+
+	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
+	if err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘删除失败: %v", err))
+		return
+	}
+
+	dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
+	if err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘删除失败: %v", err))
+		return
+	}
+	if dashboardDetail.Meta.Provisioned || !dashboardDetail.Meta.CanDelete {
+		respondError(c, http.StatusBadRequest, "当前仪表盘处于只读保护状态，不能直接删除；如需调整请先保存为自定义副本")
+		return
+	}
+
+	if err := doGrafanaJSONRequest(
+		c.Request.Context(),
+		endpoint,
+		sessionCookieHeader,
+		http.MethodDelete,
+		"/api/dashboards/uid/"+dashboardUID,
+		nil,
+		nil,
+	); err != nil {
+		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘删除失败: %v", err))
+		return
+	}
+
+	source.Status = "connected"
+	source.LastError = ""
+	source.LastCheckedAt = nowPtr()
+	_ = s.db.Save(source).Error
 
 	respondNoContent(c)
 }
@@ -509,6 +1097,421 @@ func rewriteGrafanaHTML(body []byte, proxyPrefix string) []byte {
 	content = grafanaAppURLPattern.ReplaceAllString(content, `"appUrl":"`+baseHref+`"`)
 	content = grafanaAppSubURLPattern.ReplaceAllString(content, `"appSubUrl":"`+proxyPrefix+`"`)
 	return []byte(content)
+}
+
+func listGrafanaSearchItems(
+	ctx context.Context,
+	endpoint integration.EndpointConfig,
+	sessionCookieHeader string,
+) ([]grafanaSearchItem, error) {
+	targetURL, err := url.Parse(endpoint.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid grafana endpoint: %w", err)
+	}
+
+	query := url.Values{}
+	query.Set("limit", "5000")
+	requestURL := targetURL.ResolveReference(&url.URL{
+		Path:     joinProxyPath(targetURL.Path, "/api/search"),
+		RawQuery: query.Encode(),
+	})
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	applyGrafanaAuthHeaders(request, endpoint, sessionCookieHeader)
+
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: endpoint.SkipTLSVerify}, //nolint:gosec
+		},
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 32*1024))
+		return nil, fmt.Errorf("search failed: %s", strings.TrimSpace(string(body)))
+	}
+
+	var items []grafanaSearchItem
+	if err := json.NewDecoder(response.Body).Decode(&items); err != nil {
+		return nil, err
+	}
+
+	filtered := make([]grafanaSearchItem, 0, len(items))
+	for _, item := range items {
+		if item.Type == "dash-folder" || item.Type == "dash-db" {
+			filtered = append(filtered, item)
+		}
+	}
+
+	return filtered, nil
+}
+
+func doGrafanaJSONRequest(
+	ctx context.Context,
+	endpoint integration.EndpointConfig,
+	sessionCookieHeader string,
+	method string,
+	rawPath string,
+	payload any,
+	target any,
+) error {
+	targetURL, err := url.Parse(endpoint.Endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid grafana endpoint: %w", err)
+	}
+
+	var bodyReader io.Reader
+	if payload != nil {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		bodyReader = bytes.NewReader(body)
+	}
+
+	requestURL := targetURL.ResolveReference(&url.URL{
+		Path: joinProxyPath(targetURL.Path, rawPath),
+	})
+	request, err := http.NewRequestWithContext(ctx, method, requestURL.String(), bodyReader)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Accept", "application/json")
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	applyGrafanaAuthHeaders(request, endpoint, sessionCookieHeader)
+
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: endpoint.SkipTLSVerify}, //nolint:gosec
+		},
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+		return fmt.Errorf("%s", strings.TrimSpace(string(body)))
+	}
+
+	if target == nil {
+		return nil
+	}
+
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getGrafanaFolderDetail(
+	ctx context.Context,
+	endpoint integration.EndpointConfig,
+	sessionCookieHeader string,
+	folderUID string,
+) (grafanaFolderDetailResponse, error) {
+	var detail grafanaFolderDetailResponse
+	err := doGrafanaJSONRequest(
+		ctx,
+		endpoint,
+		sessionCookieHeader,
+		http.MethodGet,
+		"/api/folders/"+folderUID,
+		nil,
+		&detail,
+	)
+	return detail, err
+}
+
+func getGrafanaDashboardDetail(
+	ctx context.Context,
+	endpoint integration.EndpointConfig,
+	sessionCookieHeader string,
+	dashboardUID string,
+) (grafanaDashboardDetailResponse, error) {
+	var detail grafanaDashboardDetailResponse
+	err := doGrafanaJSONRequest(
+		ctx,
+		endpoint,
+		sessionCookieHeader,
+		http.MethodGet,
+		"/api/dashboards/uid/"+dashboardUID,
+		nil,
+		&detail,
+	)
+	return detail, err
+}
+
+func buildGrafanaCatalog(items []grafanaSearchItem) ([]grafanaCatalogFolder, int) {
+	folderIndex := map[string]int{}
+	folders := make([]grafanaCatalogFolder, 0, len(items))
+	dashboardCount := 0
+
+	ensureFolder := func(uid, title string, isGeneral bool) int {
+		key := strings.TrimSpace(uid)
+		if key == "" {
+			key = "__general__"
+		}
+		if index, ok := folderIndex[key]; ok {
+			if title != "" && folders[index].Title == "" {
+				folders[index].Title = title
+			}
+			return index
+		}
+
+		folder := grafanaCatalogFolder{
+			UID:        uid,
+			Title:      title,
+			IsGeneral:  isGeneral,
+			Dashboards: []grafanaCatalogDashboard{},
+		}
+		if folder.Title == "" {
+			folder.Title = "未分组"
+		}
+		folderIndex[key] = len(folders)
+		folders = append(folders, folder)
+		return len(folders) - 1
+	}
+
+	for _, item := range items {
+		if item.Type == "dash-folder" {
+			ensureFolder(item.UID, item.Title, false)
+		}
+	}
+
+	for _, item := range items {
+		if item.Type != "dash-db" {
+			continue
+		}
+
+		dashboard := grafanaCatalogDashboard{
+			UID:         item.UID,
+			Title:       item.Title,
+			URL:         item.URL,
+			FolderUID:   item.FolderUID,
+			FolderTitle: item.FolderTitle,
+			Tags:        item.Tags,
+			IsStarred:   item.IsStarred,
+		}
+
+		index := ensureFolder(item.FolderUID, item.FolderTitle, strings.TrimSpace(item.FolderUID) == "")
+		folders[index].Dashboards = append(folders[index].Dashboards, dashboard)
+		folders[index].DashboardCount = len(folders[index].Dashboards)
+		dashboardCount += 1
+	}
+
+	slices.SortStableFunc(folders, func(left, right grafanaCatalogFolder) int {
+		if left.IsGeneral != right.IsGeneral {
+			if left.IsGeneral {
+				return 1
+			}
+			return -1
+		}
+		return strings.Compare(strings.ToLower(left.Title), strings.ToLower(right.Title))
+	})
+
+	for index := range folders {
+		slices.SortStableFunc(folders[index].Dashboards, func(left, right grafanaCatalogDashboard) int {
+			if left.IsStarred != right.IsStarred {
+				if left.IsStarred {
+					return -1
+				}
+				return 1
+			}
+			return strings.Compare(strings.ToLower(left.Title), strings.ToLower(right.Title))
+		})
+	}
+
+	return folders, dashboardCount
+}
+
+func buildGrafanaDashboardDefinition(
+	title string,
+	tags []string,
+	rawDefinition string,
+) (map[string]any, error) {
+	normalizedTags := normalizeGrafanaTags(tags)
+	trimmedDefinition := strings.TrimSpace(rawDefinition)
+	if trimmedDefinition == "" {
+		return buildStarterGrafanaDashboard(title, normalizedTags), nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(trimmedDefinition), &payload); err != nil {
+		return nil, fmt.Errorf("仪表盘 JSON 解析失败: %w", err)
+	}
+
+	dashboard := payload
+	if nested, ok := payload["dashboard"].(map[string]any); ok {
+		dashboard = nested
+	}
+
+	delete(dashboard, "id")
+	delete(dashboard, "uid")
+	delete(dashboard, "version")
+
+	dashboard["title"] = title
+	dashboard["editable"] = true
+	dashboard["schemaVersion"] = 39
+	dashboard["version"] = 0
+	dashboard["tags"] = normalizedTags
+	if _, ok := dashboard["time"]; !ok {
+		dashboard["time"] = map[string]any{
+			"from": "now-6h",
+			"to":   "now",
+		}
+	}
+	if _, ok := dashboard["timezone"]; !ok {
+		dashboard["timezone"] = "browser"
+	}
+	if _, ok := dashboard["refresh"]; !ok {
+		dashboard["refresh"] = "30s"
+	}
+	if _, ok := dashboard["panels"]; !ok {
+		dashboard["panels"] = buildStarterGrafanaDashboard(title, normalizedTags)["panels"]
+	}
+
+	return dashboard, nil
+}
+
+func buildStarterGrafanaDashboard(title string, tags []string) map[string]any {
+	return map[string]any{
+		"title":         title,
+		"editable":      true,
+		"schemaVersion": 39,
+		"version":       0,
+		"timezone":      "browser",
+		"refresh":       "30s",
+		"tags":          tags,
+		"time": map[string]any{
+			"from": "now-6h",
+			"to":   "now",
+		},
+		"panels": []any{
+			map[string]any{
+				"id":    1,
+				"type":  "text",
+				"title": "Dashboard Overview",
+				"gridPos": map[string]any{
+					"h": 8,
+					"w": 24,
+					"x": 0,
+					"y": 0,
+				},
+				"options": map[string]any{
+					"mode":    "markdown",
+					"content": fmt.Sprintf("### %s\n\n通过 KubeFeel 创建的自定义仪表盘，可继续在 Grafana 中补充查询与图表。", title),
+				},
+				"transparent": true,
+			},
+		},
+	}
+}
+
+func normalizeGrafanaTags(tags []string) []string {
+	seen := make(map[string]struct{}, len(tags))
+	result := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		trimmed := strings.TrimSpace(tag)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+func normalizeGrafanaFolderUID(uid string) string {
+	trimmed := strings.TrimSpace(uid)
+	switch trimmed {
+	case "", "__general__":
+		return ""
+	default:
+		return trimmed
+	}
+}
+
+func stringifyGrafanaTags(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func serializeGrafanaDashboardDefinition(dashboard map[string]any) (string, error) {
+	cloned := cloneGrafanaDashboardMap(dashboard)
+	delete(cloned, "id")
+	delete(cloned, "uid")
+	delete(cloned, "version")
+	body, err := json.MarshalIndent(cloned, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func cloneGrafanaDashboardMap(value map[string]any) map[string]any {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+
+	var cloned map[string]any
+	if err := json.Unmarshal(body, &cloned); err != nil {
+		return value
+	}
+	return cloned
+}
+
+func applyGrafanaAuthHeaders(request *http.Request, endpoint integration.EndpointConfig, sessionCookieHeader string) {
+	request.Header.Del("Cookie")
+	request.Header.Del("Authorization")
+	if sessionCookieHeader != "" {
+		request.Header.Set("Cookie", sessionCookieHeader)
+		return
+	}
+
+	if endpoint.Username == "" && endpoint.Secret != "" {
+		request.Header.Set("Authorization", "Bearer "+endpoint.Secret)
+		return
+	}
+
+	if endpoint.Username != "" || endpoint.Secret != "" {
+		token := base64.StdEncoding.EncodeToString([]byte(endpoint.Username + ":" + endpoint.Secret))
+		request.Header.Set("Authorization", "Basic "+token)
+	}
 }
 
 func (s *Server) loadObservabilityEndpoint(

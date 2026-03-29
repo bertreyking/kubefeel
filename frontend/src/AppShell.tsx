@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import {
+  AutoComplete,
   Alert,
   App as AntApp,
   Badge,
@@ -38,19 +39,27 @@ import {
 } from 'antd'
 import type { MenuProps, TableColumnsType } from 'antd'
 import {
+  ArrowLeftOutlined,
   ApiOutlined,
+  AppstoreOutlined,
   CheckCircleOutlined,
   CloudUploadOutlined,
   ClusterOutlined,
+  CompassOutlined,
   ControlOutlined,
   CopyOutlined,
   DeleteOutlined,
   DeploymentUnitOutlined,
+  EditOutlined,
   EyeOutlined,
+  FolderOpenOutlined,
+  FundProjectionScreenOutlined,
   LogoutOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RightOutlined,
   SafetyCertificateOutlined,
+  StarFilled,
   SyncOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
@@ -60,11 +69,17 @@ import YAML from 'yaml'
 import { HttpError, createApi, postPublic } from './api/client'
 import './AppShell.css'
 import type {
+  AppTemplate,
+  AppTemplateDeployResult,
   Cluster,
   ClusterInspectionSnapshot,
   ClusterProvisionCheckResult,
   ClusterProvisionJob,
   DashboardSummary,
+  GrafanaDashboardCatalog,
+  GrafanaDashboardFolder,
+  GrafanaDashboardItem,
+  GrafanaDashboardMeta,
   ImageRegistryPreset,
   K8sObject,
   ObservabilityKind,
@@ -93,6 +108,7 @@ type ViewKey =
   | 'dashboard'
   | 'clusters'
   | 'inspection'
+  | 'appTemplates'
   | 'resources'
   | 'registryIntegrations'
   | 'registryArtifacts'
@@ -146,6 +162,17 @@ type UserFormValues = {
   roleIds: number[]
 }
 
+type AppTemplateDeployFormValues = {
+  clusterId: number
+  namespace: string
+  createNamespace: boolean
+  releaseName: string
+  repoURL: string
+  chartName: string
+  version?: string
+  values?: string
+}
+
 type RoleFormValues = {
   name: string
   description: string
@@ -172,6 +199,22 @@ type ObservabilityFormValues = {
   secret?: string
   dashboardPath?: string
   skipTLSVerify: boolean
+}
+
+type GrafanaFolderFormValues = {
+  title: string
+}
+
+type GrafanaDashboardFormValues = {
+  title: string
+  folderUid?: string
+  tags?: string
+  definition?: string
+}
+
+type GrafanaBulkActionFormValues = {
+  folderUid?: string
+  cloneSuffix?: string
 }
 
 type MenuItemDefinition = {
@@ -211,6 +254,10 @@ type KubeconfigPreview = {
 type ClusterDraftSource = 'paste' | 'upload'
 
 type GrafanaWorkspaceSection = 'dashboard' | 'explore'
+
+type GrafanaDashboardSortMode = 'starred' | 'titleAsc' | 'titleDesc'
+type GrafanaDashboardModalMode = 'create' | 'edit' | 'clone'
+type GrafanaDashboardSubmitMode = 'move' | 'clone'
 
 type ResourceDrawerMode = 'create' | 'edit' | 'clone' | 'inspect'
 
@@ -282,6 +329,24 @@ type DeploymentInsight = {
   conditions: DeploymentConditionInsight[]
 }
 
+type GrafanaFolderCreateResult = {
+  id: number
+  uid: string
+  title: string
+  url: string
+}
+
+type GrafanaDashboardCreateResult = {
+  id: number
+  uid: string
+  url: string
+  status: string
+  version: number
+  title: string
+  folderUid: string
+  tags: string[]
+}
+
 const containerMenuKey = 'container-management'
 const registryMenuKey = 'registry-management'
 const observabilityMenuKey = 'observability-management'
@@ -304,6 +369,12 @@ const menuDefinitions: MenuItemDefinition[] = [
     label: '一键巡检',
     icon: <CheckCircleOutlined />,
     permission: 'clusters:read',
+  },
+  {
+    key: 'appTemplates',
+    label: '应用模版',
+    icon: <AppstoreOutlined />,
+    permission: 'resources:read',
   },
   {
     key: 'resources',
@@ -402,6 +473,7 @@ function Workspace() {
   const [permissions, setPermissions] = useState<Permission[]>([])
   const [users, setUsers] = useState<User[]>([])
   const [resourceTypes, setResourceTypes] = useState<ResourceDefinition[]>([])
+  const [appTemplates, setAppTemplates] = useState<AppTemplate[]>([])
   const [provisionTemplates, setProvisionTemplates] = useState<ProvisionTemplate[]>([])
   const [imageRegistryPresets, setImageRegistryPresets] = useState<ImageRegistryPreset[]>([])
   const [repositoryProviders, setRepositoryProviders] = useState<RepositoryProvider[]>([])
@@ -424,6 +496,12 @@ function Workspace() {
   const [selectedNamespace, setSelectedNamespace] = useState('')
   const [resourceSearch, setResourceSearch] = useState('')
   const deferredSearch = useDeferredValue(resourceSearch)
+  const [appTemplateSearch, setAppTemplateSearch] = useState('')
+  const [selectedAppTemplateKey, setSelectedAppTemplateKey] = useState('')
+  const [appTemplateDeploying, setAppTemplateDeploying] = useState(false)
+  const [appTemplateDeployResult, setAppTemplateDeployResult] =
+    useState<AppTemplateDeployResult | null>(null)
+  const lastAppliedAppTemplateKeyRef = useRef('')
 
   const [clusterSearch, setClusterSearch] = useState('')
   const [clusterSearchDraft, setClusterSearchDraft] = useState('')
@@ -439,10 +517,38 @@ function Workspace() {
   const [expandedRegistryImageKeys, setExpandedRegistryImageKeys] = useState<Record<string, string[]>>({})
   const [observabilitySourceSearch, setObservabilitySourceSearch] = useState('')
   const [selectedGrafanaSourceId, setSelectedGrafanaSourceId] = useState<number>()
+  const [grafanaCatalogCache, setGrafanaCatalogCache] = useState<Record<number, GrafanaDashboardCatalog>>({})
+  const [grafanaCatalogSnapshot, setGrafanaCatalogSnapshot] = useState<GrafanaDashboardCatalog | null>(null)
+  const [grafanaCatalogLoading, setGrafanaCatalogLoading] = useState(false)
+  const [grafanaDashboardSearch, setGrafanaDashboardSearch] = useState('')
+  const deferredGrafanaDashboardSearch = useDeferredValue(grafanaDashboardSearch)
+  const [grafanaDashboardSortMode, setGrafanaDashboardSortMode] =
+    useState<GrafanaDashboardSortMode>('starred')
+  const [expandedGrafanaFolderKeys, setExpandedGrafanaFolderKeys] = useState<string[]>([])
+  const [selectedGrafanaDashboard, setSelectedGrafanaDashboard] = useState<GrafanaDashboardItem | null>(null)
   const [grafanaWorkspaceSection, setGrafanaWorkspaceSection] =
     useState<GrafanaWorkspaceSection>('dashboard')
+  const [grafanaExploreActive, setGrafanaExploreActive] = useState(false)
   const [grafanaEmbedError, setGrafanaEmbedError] = useState('')
   const [grafanaFrameNonce, setGrafanaFrameNonce] = useState(0)
+  const [selectedGrafanaDashboardUIDs, setSelectedGrafanaDashboardUIDs] = useState<string[]>([])
+  const [editingGrafanaFolder, setEditingGrafanaFolder] = useState<GrafanaDashboardFolder | null>(null)
+  const [grafanaFolderModalOpen, setGrafanaFolderModalOpen] = useState(false)
+  const [deletingGrafanaFolderUid, setDeletingGrafanaFolderUid] = useState('')
+  const [editingGrafanaDashboard, setEditingGrafanaDashboard] = useState<GrafanaDashboardItem | null>(null)
+  const [grafanaDashboardModalMode, setGrafanaDashboardModalMode] =
+    useState<GrafanaDashboardModalMode>('create')
+  const [grafanaDashboardSubmitMode, setGrafanaDashboardSubmitMode] =
+    useState<GrafanaDashboardSubmitMode>('move')
+  const [grafanaDashboardDraftDefinition, setGrafanaDashboardDraftDefinition] = useState('')
+  const [grafanaDashboardModalOpen, setGrafanaDashboardModalOpen] = useState(false)
+  const [grafanaBulkActionMode, setGrafanaBulkActionMode] =
+    useState<GrafanaDashboardSubmitMode>('move')
+  const [grafanaBulkActionOpen, setGrafanaBulkActionOpen] = useState(false)
+  const [grafanaBulkActionSubmitting, setGrafanaBulkActionSubmitting] = useState(false)
+  const [grafanaFolderSubmitting, setGrafanaFolderSubmitting] = useState(false)
+  const [grafanaDashboardSubmitting, setGrafanaDashboardSubmitting] = useState(false)
+  const [deletingGrafanaDashboardUid, setDeletingGrafanaDashboardUid] = useState('')
   const grafanaFrameRef = useRef<HTMLIFrameElement | null>(null)
 
   const [userSearch, setUserSearch] = useState('')
@@ -506,10 +612,14 @@ function Workspace() {
 
   const [clusterForm] = Form.useForm<ClusterFormValues>()
   const [clusterProvisionForm] = Form.useForm<ClusterProvisionFormValues>()
+  const [appTemplateForm] = Form.useForm<AppTemplateDeployFormValues>()
   const [userForm] = Form.useForm<UserFormValues>()
   const [roleForm] = Form.useForm<RoleFormValues>()
   const [registryForm] = Form.useForm<RegistryFormValues>()
   const [observabilityForm] = Form.useForm<ObservabilityFormValues>()
+  const [grafanaFolderForm] = Form.useForm<GrafanaFolderFormValues>()
+  const [grafanaDashboardForm] = Form.useForm<GrafanaDashboardFormValues>()
+  const [grafanaBulkActionForm] = Form.useForm<GrafanaBulkActionFormValues>()
 
   const watchedKubeconfig = Form.useWatch('kubeconfig', clusterForm) ?? ''
   const watchedRoleIds = Form.useWatch('roleIds', userForm) ?? []
@@ -545,7 +655,10 @@ function Workspace() {
   const containerChildren = accessibleViews
     .filter(
       (item) =>
-        item.key === 'clusters' || item.key === 'inspection' || item.key === 'resources',
+        item.key === 'clusters' ||
+        item.key === 'inspection' ||
+        item.key === 'appTemplates' ||
+        item.key === 'resources',
     )
     .map((item) => ({
       key: item.key,
@@ -631,6 +744,7 @@ function Workspace() {
       setPermissions([])
       setUsers([])
       setResourceTypes([])
+      setAppTemplates([])
       setRepositoryProviders([])
       setRegistries([])
       setObservabilityKinds([])
@@ -641,11 +755,13 @@ function Workspace() {
       setClusterInspection(null)
       setRegistryArtifactsSnapshot(null)
       setSelectedClusterId(undefined)
+      setSelectedAppTemplateKey('')
       setSelectedRegistryId(undefined)
       setSelectedGrafanaSourceId(undefined)
       setSelectedNamespace('')
       setSelectedUserId(undefined)
       setSelectedRoleId(undefined)
+      setAppTemplateDeployResult(null)
       setSelectedResourceKey('')
       setResourceDetailOpen(false)
       setResourceDetailLoading(false)
@@ -654,6 +770,19 @@ function Workspace() {
   }, [sessionToken])
 
   const permissionGroups = groupPermissions(permissions)
+
+  const selectedAppTemplate =
+    appTemplates.find((item) => item.key === selectedAppTemplateKey) ?? appTemplates[0] ?? null
+  const filteredAppTemplates = appTemplates.filter((item) => {
+    const query = appTemplateSearch.trim().toLowerCase()
+    if (!query) {
+      return true
+    }
+
+    return [item.label, item.description, item.category, item.chartName, item.repoURL]
+      .filter(Boolean)
+      .some((value) => value.toLowerCase().includes(query))
+  })
 
   const filteredClusters = clusters.filter((cluster) => {
     const query = clusterSearch.trim().toLowerCase()
@@ -744,18 +873,74 @@ function Workspace() {
   const grafanaSources = observabilitySources.filter((item) => item.type === 'grafana')
   const selectedGrafanaSource =
     grafanaSources.find((item) => item.id === selectedGrafanaSourceId) ?? grafanaSources[0] ?? null
+  const grafanaDashboardCloneLocked = grafanaDashboardModalMode === 'clone'
+  const grafanaDashboardSubmitAsClone =
+    grafanaDashboardCloneLocked ||
+    (grafanaDashboardModalMode === 'edit' && grafanaDashboardSubmitMode === 'clone')
+  const allGrafanaDashboardItems = useMemo(
+    () => (grafanaCatalogSnapshot?.folders ?? []).flatMap((folder) => folder.dashboards ?? []),
+    [grafanaCatalogSnapshot?.folders],
+  )
+  const selectedGrafanaDashboardSet = useMemo(
+    () => new Set(selectedGrafanaDashboardUIDs),
+    [selectedGrafanaDashboardUIDs],
+  )
+  const selectedGrafanaDashboardItems = useMemo(() => {
+    const itemByUID = new Map(allGrafanaDashboardItems.map((item) => [item.uid, item]))
+    return selectedGrafanaDashboardUIDs
+      .map((uid) => itemByUID.get(uid))
+      .filter((item): item is GrafanaDashboardItem => Boolean(item))
+  }, [allGrafanaDashboardItems, selectedGrafanaDashboardUIDs])
   const grafanaWorkspacePath = selectedGrafanaSource
-    ? buildGrafanaWorkspacePath(selectedGrafanaSource.dashboardPath || '/dashboards', grafanaWorkspaceSection)
+    ? buildGrafanaWorkspacePath({
+        section: grafanaWorkspaceSection,
+        defaultPath: selectedGrafanaSource.dashboardPath || '/dashboards',
+        selectedDashboardUrl: selectedGrafanaDashboard?.url,
+        exploreActive: grafanaExploreActive,
+      })
+    : '/dashboards'
+  const grafanaExternalPath = selectedGrafanaSource
+    ? buildGrafanaExternalPath({
+        section: grafanaWorkspaceSection,
+        defaultPath: selectedGrafanaSource.dashboardPath || '/dashboards',
+        selectedDashboardUrl: selectedGrafanaDashboard?.url,
+      })
     : '/dashboards'
   const grafanaImmersivePath = selectedGrafanaSource
-    ? buildGrafanaImmersivePath(grafanaWorkspacePath)
-    : '/dashboards'
-  const grafanaEmbedSrc = selectedGrafanaSource
+    ? grafanaWorkspacePath
+      ? buildGrafanaImmersivePath(grafanaWorkspacePath)
+      : ''
+    : ''
+  const grafanaEmbedSrc = selectedGrafanaSource && grafanaImmersivePath
     ? buildGrafanaEmbedSrc(selectedGrafanaSource.id, grafanaImmersivePath)
     : ''
   const grafanaExternalHref = selectedGrafanaSource
-    ? buildGrafanaExternalHref(selectedGrafanaSource.endpoint, grafanaWorkspacePath)
+    ? buildGrafanaExternalHref(selectedGrafanaSource.endpoint, grafanaExternalPath)
     : ''
+  const filteredGrafanaFolders = useMemo(
+    () =>
+      sortGrafanaCatalogFolders(
+        filterGrafanaCatalogFolders(grafanaCatalogSnapshot?.folders ?? [], deferredGrafanaDashboardSearch),
+        grafanaDashboardSortMode,
+      ),
+    [deferredGrafanaDashboardSearch, grafanaCatalogSnapshot?.folders, grafanaDashboardSortMode],
+  )
+  const filteredGrafanaDashboardCount = useMemo(
+    () => filteredGrafanaFolders.reduce((total, folder) => total + folder.dashboards.length, 0),
+    [filteredGrafanaFolders],
+  )
+  const grafanaFolderOptions = useMemo(
+    () => [
+      { label: '未分组 / General', value: '__general__' },
+      ...(grafanaCatalogSnapshot?.folders ?? [])
+        .filter((item) => !item.isGeneral)
+        .map((item) => ({
+          label: item.title,
+          value: item.uid,
+        })),
+    ],
+    [grafanaCatalogSnapshot?.folders],
+  )
   const registryImageSpaces = useMemo(
     () =>
       registryArtifactsSnapshot?.imageSpaces && registryArtifactsSnapshot.imageSpaces.length > 0
@@ -884,6 +1069,12 @@ function Workspace() {
     },
   )
 
+  const refreshGrafanaCatalogEvent = useEffectEvent(
+    async (client: ReturnType<typeof createApi>, sourceId: number) => {
+      await refreshGrafanaCatalog(client, sourceId)
+    },
+  )
+
   const refreshClusterProvisionJobEvent = useEffectEvent(
     async (client: ReturnType<typeof createApi>, currentJob: ClusterProvisionJob) => {
       try {
@@ -986,6 +1177,32 @@ function Workspace() {
   }, [activeView, api, canReadRegistries, registryArtifactCache, selectedRegistryId])
 
   useEffect(() => {
+    if (
+      !api ||
+      !canReadObservability ||
+      activeView !== 'observabilityDashboards' ||
+      !selectedGrafanaSourceId ||
+      grafanaWorkspaceSection !== 'dashboard'
+    ) {
+      return
+    }
+
+    if (grafanaCatalogCache[selectedGrafanaSourceId]) {
+      setGrafanaCatalogSnapshot(grafanaCatalogCache[selectedGrafanaSourceId] ?? null)
+      return
+    }
+
+    void refreshGrafanaCatalogEvent(api, selectedGrafanaSourceId)
+  }, [
+    activeView,
+    api,
+    canReadObservability,
+    grafanaCatalogCache,
+    grafanaWorkspaceSection,
+    selectedGrafanaSourceId,
+  ])
+
+  useEffect(() => {
     if (!selectedResourceDefinition?.namespaced) {
       setSelectedNamespace('')
     }
@@ -1040,6 +1257,16 @@ function Workspace() {
   }, [grafanaSources])
 
   useEffect(() => {
+    if (!selectedGrafanaSourceId) {
+      setGrafanaCatalogSnapshot(null)
+      setSelectedGrafanaDashboardUIDs([])
+      return
+    }
+
+    setGrafanaCatalogSnapshot(grafanaCatalogCache[selectedGrafanaSourceId] ?? null)
+  }, [grafanaCatalogCache, selectedGrafanaSourceId])
+
+  useEffect(() => {
     setExpandedRegistrySpaceKeys([])
     setExpandedRegistryImageKeys({})
   }, [registryArtifactsSnapshot?.integration.id, deferredRegistryArtifactSearch])
@@ -1052,12 +1279,38 @@ function Workspace() {
   }, [selectedGrafanaSource])
 
   useEffect(() => {
+    setSelectedGrafanaDashboard(null)
+    setGrafanaExploreActive(false)
+    setGrafanaDashboardSearch('')
+    setExpandedGrafanaFolderKeys([])
+    setSelectedGrafanaDashboardUIDs([])
+    setEditingGrafanaFolder(null)
+    setEditingGrafanaDashboard(null)
+    setGrafanaDashboardModalMode('create')
+    setGrafanaDashboardSubmitMode('move')
+    setGrafanaDashboardDraftDefinition('')
+    setGrafanaBulkActionOpen(false)
+    setGrafanaBulkActionSubmitting(false)
+  }, [selectedGrafanaSourceId])
+
+  useEffect(() => {
+    if (selectedGrafanaDashboardUIDs.length === 0) {
+      return
+    }
+
+    const validUIDs = new Set(allGrafanaDashboardItems.map((item) => item.uid))
+    setSelectedGrafanaDashboardUIDs((current) =>
+      current.filter((uid) => validUIDs.has(uid)),
+    )
+  }, [allGrafanaDashboardItems, selectedGrafanaDashboardUIDs.length])
+
+  useEffect(() => {
     setGrafanaEmbedError('')
-  }, [grafanaEmbedSrc, selectedGrafanaSourceId, grafanaWorkspaceSection])
+  }, [grafanaEmbedSrc, selectedGrafanaSourceId, grafanaWorkspaceSection, selectedGrafanaDashboard, grafanaExploreActive])
 
   useEffect(() => {
     setGrafanaFrameNonce(0)
-  }, [selectedGrafanaSourceId, grafanaWorkspaceSection])
+  }, [selectedGrafanaSourceId, grafanaWorkspaceSection, selectedGrafanaDashboard, grafanaExploreActive])
 
   useEffect(() => {
     if (editingCluster) {
@@ -1145,6 +1398,46 @@ function Workspace() {
   }, [clusterProvisionDraft, clusterProvisionForm, imageRegistryPresets])
 
   useEffect(() => {
+    if (appTemplates.length === 0) {
+      return
+    }
+
+    if (appTemplates.some((item) => item.key === selectedAppTemplateKey)) {
+      return
+    }
+
+    setSelectedAppTemplateKey(appTemplates[0]?.key ?? '')
+  }, [appTemplates, selectedAppTemplateKey])
+
+  useEffect(() => {
+    if (!selectedAppTemplate) {
+      return
+    }
+
+    const current = appTemplateForm.getFieldsValue()
+    const templateChanged = lastAppliedAppTemplateKeyRef.current !== selectedAppTemplate.key
+    if (templateChanged) {
+      lastAppliedAppTemplateKeyRef.current = selectedAppTemplate.key
+      appTemplateForm.setFieldsValue({
+        clusterId: current.clusterId ?? selectedClusterId,
+        namespace: selectedAppTemplate.namespaceHint || 'default',
+        createNamespace: false,
+        releaseName: selectedAppTemplate.releaseNameHint,
+        repoURL: selectedAppTemplate.repoURL,
+        chartName: selectedAppTemplate.chartName,
+        version: selectedAppTemplate.defaultVersion || '',
+        values: selectedAppTemplate.values,
+      })
+      setAppTemplateDeployResult(null)
+      return
+    }
+
+    appTemplateForm.setFieldsValue({
+      clusterId: current.clusterId ?? selectedClusterId,
+    })
+  }, [appTemplateForm, selectedAppTemplate, selectedClusterId])
+
+  useEffect(() => {
     if (!filteredUsers.some((user) => user.id === selectedUserId)) {
       setSelectedUserId(filteredUsers[0]?.id)
     }
@@ -1185,13 +1478,26 @@ function Workspace() {
     setPermissions([])
     setUsers([])
     setResourceTypes([])
+    setAppTemplates([])
     setImageRegistryPresets([])
     setNamespaces([])
     setResources([])
+    setAppTemplateSearch('')
+    setSelectedAppTemplateKey('')
+    setAppTemplateDeployResult(null)
     setSelectedClusterId(undefined)
     setSelectedNamespace('')
     setSelectedUserId(undefined)
     setSelectedRoleId(undefined)
+    setSelectedGrafanaSourceId(undefined)
+    setGrafanaCatalogCache({})
+    setGrafanaCatalogSnapshot(null)
+    setExpandedGrafanaFolderKeys([])
+    setSelectedGrafanaDashboard(null)
+    setGrafanaExploreActive(false)
+    setGrafanaDashboardSearch('')
+    setEditingGrafanaFolder(null)
+    setEditingGrafanaDashboard(null)
     setSelectedResourceKey('')
     setResourceDetailOpen(false)
     setResourceDetailLoading(false)
@@ -1216,6 +1522,7 @@ function Workspace() {
         userData,
         permissionData,
         resourceDefinitionData,
+        appTemplateData,
         provisionTemplateData,
         imageRegistryPresetData,
         repositoryProviderData,
@@ -1238,6 +1545,9 @@ function Workspace() {
           : Promise.resolve([]),
         me.permissions.includes('resources:read')
           ? client.get<ResourceDefinition[]>('/catalog/resource-types')
+          : Promise.resolve([]),
+        me.permissions.includes('resources:read')
+          ? client.get<AppTemplate[]>('/catalog/app-templates')
           : Promise.resolve([]),
         me.permissions.includes('clusters:write')
           ? client.get<ProvisionTemplate[]>('/catalog/provision-templates')
@@ -1275,12 +1585,23 @@ function Workspace() {
         setUsers(userData)
         setPermissions(permissionData)
         setResourceTypes(resourceDefinitionData)
+        setAppTemplates(appTemplateData)
         setProvisionTemplates(provisionTemplateData)
         setImageRegistryPresets(imageRegistryPresetData)
         setRepositoryProviders(repositoryProviderData)
         setRegistries(registryData)
         setObservabilityKinds(observabilityKindData)
         setObservabilitySources(observabilitySourceData)
+        setGrafanaCatalogCache({})
+        setGrafanaCatalogSnapshot(null)
+        setExpandedGrafanaFolderKeys([])
+        setSelectedGrafanaDashboard(null)
+        setGrafanaExploreActive(false)
+        setEditingGrafanaFolder(null)
+        setEditingGrafanaDashboard(null)
+        setGrafanaDashboardModalMode('create')
+        setGrafanaDashboardSubmitMode('move')
+        setGrafanaDashboardDraftDefinition('')
         setSelectedClusterId((current) => pickPreferredClusterId(clusterData, current))
         setSelectedRegistryId((current) =>
           pickCurrentOrFirstId(registryData.map((item) => item.id), current),
@@ -1297,6 +1618,11 @@ function Workspace() {
           resourceDefinitionData.some((item) => item.key === current)
             ? current
             : resourceDefinitionData[0]?.key ?? 'deployment',
+        )
+        setSelectedAppTemplateKey((current) =>
+          appTemplateData.some((item) => item.key === current)
+            ? current
+            : appTemplateData[0]?.key ?? '',
         )
       })
     } catch (error) {
@@ -1316,6 +1642,18 @@ function Workspace() {
       setClusters(data)
       setSelectedClusterId((current) => pickPreferredClusterId(data, current))
     })
+  }
+
+  async function refreshAppTemplates(client = api) {
+    if (!client || !canReadResources) {
+      return
+    }
+
+    const data = await client.get<AppTemplate[]>('/catalog/app-templates')
+    setAppTemplates(data)
+    setSelectedAppTemplateKey((current) =>
+      data.some((item) => item.key === current) ? current : data[0]?.key ?? '',
+    )
   }
 
   async function refreshUsers(client = api) {
@@ -1393,12 +1731,47 @@ function Workspace() {
     ])
     setObservabilityKinds(kindData)
     setObservabilitySources(sourceData)
+    setGrafanaCatalogCache({})
+    setGrafanaCatalogSnapshot(null)
+    setExpandedGrafanaFolderKeys([])
+    setSelectedGrafanaDashboard(null)
+    setGrafanaExploreActive(false)
+    setEditingGrafanaFolder(null)
+    setEditingGrafanaDashboard(null)
+    setGrafanaDashboardModalMode('create')
+    setGrafanaDashboardSubmitMode('move')
+    setGrafanaDashboardDraftDefinition('')
+    setGrafanaBulkActionOpen(false)
+    setGrafanaBulkActionSubmitting(false)
+    setSelectedGrafanaDashboardUIDs([])
     setSelectedGrafanaSourceId((current) =>
       pickCurrentOrFirstId(
         sourceData.filter((item) => item.type === 'grafana').map((item) => item.id),
         current,
       ),
     )
+  }
+
+  async function refreshGrafanaCatalog(client = api, sourceId = selectedGrafanaSourceId) {
+    if (!client || !canReadObservability || !sourceId) {
+      return null
+    }
+
+    setGrafanaCatalogLoading(true)
+    try {
+      const data = await client.get<GrafanaDashboardCatalog>(`/observability/grafana-catalog/${sourceId}`)
+      setGrafanaCatalogCache((current) => ({
+        ...current,
+        [sourceId]: data,
+      }))
+      setGrafanaCatalogSnapshot(data)
+      return data
+    } catch (error) {
+      handleError(error, '加载仪表盘目录失败')
+      return null
+    } finally {
+      setGrafanaCatalogLoading(false)
+    }
   }
 
   async function refreshDashboard(client = api, clusterId = selectedClusterId) {
@@ -1408,6 +1781,516 @@ function Workspace() {
 
     const data = await client.get<DashboardSummary>(buildDashboardPath(clusterId))
     setDashboard(data)
+  }
+
+  function applyAppTemplatePreset(template: AppTemplate, clusterId = selectedClusterId) {
+    lastAppliedAppTemplateKeyRef.current = template.key
+    appTemplateForm.setFieldsValue({
+      clusterId,
+      namespace: template.namespaceHint || 'default',
+      createNamespace: false,
+      releaseName: template.releaseNameHint,
+      repoURL: template.repoURL,
+      chartName: template.chartName,
+      version: template.defaultVersion || '',
+      values: template.values,
+    })
+    setSelectedAppTemplateKey(template.key)
+    setAppTemplateDeployResult(null)
+  }
+
+  async function submitAppTemplateDeployment() {
+    if (!api || !canWriteResources) {
+      return
+    }
+
+    try {
+      const values = await appTemplateForm.validateFields()
+      setAppTemplateDeploying(true)
+      const result = await api.post<AppTemplateDeployResult>('/app-templates/deploy', {
+        clusterId: values.clusterId,
+        namespace: values.namespace,
+        createNamespace: values.createNamespace,
+        releaseName: values.releaseName,
+        templateKey: selectedAppTemplateKey,
+        repoURL: values.repoURL,
+        chartName: values.chartName,
+        version: values.version,
+        values: values.values,
+      })
+      message.success(result.operation === 'upgraded' ? '应用升级成功' : '应用部署成功')
+      setSelectedClusterId(values.clusterId)
+      setAppTemplateDeployResult(result)
+      await refreshNamespaces(api, values.clusterId)
+    } catch (error) {
+      if (isFormValidationError(error)) {
+        return
+      }
+      handleError(error, '部署 Helm 应用失败')
+    } finally {
+      setAppTemplateDeploying(false)
+    }
+  }
+
+  function openObservabilityDashboardHome(sourceId?: number) {
+    if (typeof sourceId === 'number') {
+      setSelectedGrafanaSourceId(sourceId)
+    }
+    setGrafanaWorkspaceSection('dashboard')
+    setSelectedGrafanaDashboard(null)
+    setGrafanaExploreActive(false)
+    setGrafanaEmbedError('')
+    startTransition(() => setActiveView('observabilityDashboards'))
+  }
+
+  function openGrafanaDashboardViewer(item: GrafanaDashboardItem) {
+    setGrafanaWorkspaceSection('dashboard')
+    setSelectedGrafanaDashboard(item)
+    setGrafanaExploreActive(false)
+    setGrafanaEmbedError('')
+  }
+
+  function toggleGrafanaFolder(folder: GrafanaDashboardFolder) {
+    const key = folder.uid || '__general__'
+    setExpandedGrafanaFolderKeys((current) =>
+      current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
+    )
+  }
+
+  function openGrafanaFolderModal(folder?: GrafanaDashboardFolder) {
+    if (!selectedGrafanaSourceId) {
+      return
+    }
+    setEditingGrafanaFolder(folder ?? null)
+    setGrafanaFolderModalOpen(true)
+    grafanaFolderForm.setFieldsValue({ title: folder?.title ?? '' })
+  }
+
+  function closeGrafanaFolderModal() {
+    setGrafanaFolderModalOpen(false)
+    setGrafanaFolderSubmitting(false)
+    setEditingGrafanaFolder(null)
+    grafanaFolderForm.resetFields()
+  }
+
+  function openGrafanaDashboardModal(
+    folderUid?: string,
+    dashboard?: GrafanaDashboardItem,
+    mode: GrafanaDashboardModalMode = dashboard ? 'edit' : 'create',
+    definition = '',
+  ) {
+    if (!selectedGrafanaSourceId) {
+      return
+    }
+    setGrafanaDashboardModalMode(mode)
+    setGrafanaDashboardSubmitMode(mode === 'clone' ? 'clone' : 'move')
+    setGrafanaDashboardDraftDefinition(definition)
+    setEditingGrafanaDashboard(dashboard ?? null)
+    setGrafanaDashboardModalOpen(true)
+    grafanaDashboardForm.setFieldsValue({
+      title:
+        mode === 'clone'
+          ? `${dashboard?.title ?? ''} 副本`
+          : dashboard?.title ?? '',
+      folderUid: folderUid || dashboard?.folderUid || '__general__',
+      tags: dashboard?.tags?.join(', ') ?? '',
+      definition,
+    })
+  }
+
+  function closeGrafanaDashboardModal() {
+    setGrafanaDashboardModalOpen(false)
+    setGrafanaDashboardSubmitting(false)
+    setEditingGrafanaDashboard(null)
+    setGrafanaDashboardModalMode('create')
+    setGrafanaDashboardSubmitMode('move')
+    setGrafanaDashboardDraftDefinition('')
+    grafanaDashboardForm.resetFields()
+  }
+
+  function changeGrafanaDashboardSubmitMode(nextMode: GrafanaDashboardSubmitMode) {
+    if (!editingGrafanaDashboard || grafanaDashboardCloneLocked) {
+      return
+    }
+
+    const originalTitle = editingGrafanaDashboard.title
+    const currentTitle = String(grafanaDashboardForm.getFieldValue('title') ?? '').trim()
+
+    if (nextMode === 'clone' && (!currentTitle || currentTitle === originalTitle)) {
+      grafanaDashboardForm.setFieldsValue({ title: `${originalTitle} 副本` })
+    }
+
+    if (nextMode === 'move' && currentTitle === `${originalTitle} 副本`) {
+      grafanaDashboardForm.setFieldsValue({ title: originalTitle })
+    }
+
+    setGrafanaDashboardSubmitMode(nextMode)
+  }
+
+  function toggleGrafanaDashboardSelection(item: GrafanaDashboardItem, checked: boolean) {
+    setSelectedGrafanaDashboardUIDs((current) => {
+      if (checked) {
+        return current.includes(item.uid) ? current : [...current, item.uid]
+      }
+      return current.filter((uid) => uid !== item.uid)
+    })
+  }
+
+  function toggleGrafanaFolderSelection(folder: GrafanaDashboardFolder, checked: boolean) {
+    const folderUIDs = folder.dashboards.map((item) => item.uid)
+    setSelectedGrafanaDashboardUIDs((current) => {
+      if (checked) {
+        return [...new Set([...current, ...folderUIDs])]
+      }
+      return current.filter((uid) => !folderUIDs.includes(uid))
+    })
+  }
+
+  function selectAllVisibleGrafanaDashboards() {
+    const nextUIDs = filteredGrafanaFolders.flatMap((folder) =>
+      folder.dashboards.map((item) => item.uid),
+    )
+    setSelectedGrafanaDashboardUIDs(Array.from(new Set(nextUIDs)))
+  }
+
+  function clearGrafanaDashboardSelection() {
+    setSelectedGrafanaDashboardUIDs([])
+  }
+
+  function openGrafanaBulkActionModal(mode: GrafanaDashboardSubmitMode) {
+    if (!selectedGrafanaDashboardItems.length) {
+      message.info('请先选择至少一个仪表盘')
+      return
+    }
+
+    setGrafanaBulkActionMode(mode)
+    setGrafanaBulkActionOpen(true)
+    grafanaBulkActionForm.setFieldsValue({
+      folderUid: '__general__',
+      cloneSuffix: '副本',
+    })
+  }
+
+  function closeGrafanaBulkActionModal() {
+    setGrafanaBulkActionOpen(false)
+    setGrafanaBulkActionSubmitting(false)
+    grafanaBulkActionForm.resetFields()
+  }
+
+  async function submitGrafanaBulkAction() {
+    if (!api || !selectedGrafanaSourceId || selectedGrafanaDashboardItems.length === 0) {
+      return
+    }
+
+    setGrafanaBulkActionSubmitting(true)
+    try {
+      const values = await grafanaBulkActionForm.validateFields()
+      const targetFolderUID = values.folderUid === '__general__' ? '' : values.folderUid || ''
+      const cloneSuffix = (values.cloneSuffix || '副本').trim() || '副本'
+      const skippedProvisioned: string[] = []
+      let succeeded = 0
+
+      for (const item of selectedGrafanaDashboardItems) {
+        const meta = await api.get<GrafanaDashboardMeta>(
+          `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards/${item.uid}/meta`,
+        )
+        const title = meta.title || item.title
+        const tags = meta.tags?.length > 0 ? meta.tags : item.tags
+
+        if (grafanaBulkActionMode === 'move') {
+          if (meta.provisioned || !meta.canSave) {
+            skippedProvisioned.push(title)
+            continue
+          }
+
+          await api.put<GrafanaDashboardCreateResult>(
+            `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards/${item.uid}`,
+            {
+              title,
+              folderUid: targetFolderUID,
+              tags,
+              definition: '',
+            },
+          )
+          succeeded += 1
+          continue
+        }
+
+        await api.post<GrafanaDashboardCreateResult>(
+          `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards`,
+          {
+            title: `${title} ${cloneSuffix}`.trim(),
+            folderUid: targetFolderUID,
+            tags,
+            definition: meta.definition,
+          },
+        )
+        succeeded += 1
+      }
+
+      await refreshGrafanaCatalog(api, selectedGrafanaSourceId)
+      const expandedFolderKey = targetFolderUID || '__general__'
+      setExpandedGrafanaFolderKeys((current) =>
+        current.includes(expandedFolderKey) ? current : [...current, expandedFolderKey],
+      )
+      closeGrafanaBulkActionModal()
+      clearGrafanaDashboardSelection()
+
+      if (grafanaBulkActionMode === 'move') {
+        if (succeeded > 0 && skippedProvisioned.length > 0) {
+          message.warning(`已移动 ${succeeded} 个，另有 ${skippedProvisioned.length} 个只读仪表盘仅支持保存副本`)
+        } else if (succeeded > 0) {
+          message.success(`已移动 ${succeeded} 个仪表盘`)
+        } else {
+          message.warning('当前选中的仪表盘都处于只读保护状态，只支持保存副本')
+        }
+      } else {
+        message.success(`已保存 ${succeeded} 个仪表盘副本`)
+      }
+    } catch (error) {
+      handleError(
+        error,
+        grafanaBulkActionMode === 'move' ? '批量移动仪表盘失败' : '批量保存副本失败',
+      )
+    } finally {
+      setGrafanaBulkActionSubmitting(false)
+    }
+  }
+
+  function openGrafanaExploreEntry() {
+    setGrafanaWorkspaceSection('explore')
+    setGrafanaExploreActive(false)
+    setGrafanaEmbedError('')
+  }
+
+  async function submitGrafanaFolder() {
+    if (!api || !selectedGrafanaSourceId) {
+      return
+    }
+
+    setGrafanaFolderSubmitting(true)
+    try {
+      const values = await grafanaFolderForm.validateFields()
+      if (editingGrafanaFolder) {
+        await api.put<GrafanaFolderCreateResult>(
+          `/observability/grafana-catalog/${selectedGrafanaSourceId}/folders/${editingGrafanaFolder.uid}`,
+          { title: values.title.trim() },
+        )
+      } else {
+        await api.post<GrafanaFolderCreateResult>(
+          `/observability/grafana-catalog/${selectedGrafanaSourceId}/folders`,
+          { title: values.title.trim() },
+        )
+      }
+      const nextCatalog = await refreshGrafanaCatalog(api, selectedGrafanaSourceId)
+      const targetUID = editingGrafanaFolder?.uid
+      if (targetUID) {
+        setExpandedGrafanaFolderKeys((current) =>
+          current.includes(targetUID) ? current : [...current, targetUID],
+        )
+      } else if (nextCatalog) {
+        const createdFolder = nextCatalog.folders.find((item) => item.title === values.title.trim())
+        if (createdFolder?.uid) {
+          setExpandedGrafanaFolderKeys((current) =>
+            current.includes(createdFolder.uid) ? current : [...current, createdFolder.uid],
+          )
+        }
+      }
+      closeGrafanaFolderModal()
+      message.success(editingGrafanaFolder ? '目录更新成功' : '目录创建成功')
+    } catch (error) {
+      handleError(error, editingGrafanaFolder ? '更新目录失败' : '创建目录失败')
+    } finally {
+      setGrafanaFolderSubmitting(false)
+    }
+  }
+
+  async function submitGrafanaDashboard() {
+    if (!api || !selectedGrafanaSourceId) {
+      return
+    }
+
+    setGrafanaDashboardSubmitting(true)
+    try {
+      const values = await grafanaDashboardForm.validateFields()
+      const shouldClone =
+        grafanaDashboardModalMode === 'clone' ||
+        (grafanaDashboardModalMode === 'edit' && grafanaDashboardSubmitMode === 'clone')
+      const payload = {
+        title: values.title.trim(),
+        folderUid: values.folderUid === '__general__' ? '' : values.folderUid || '',
+        tags: splitCommaSeparatedValues(values.tags),
+        definition:
+          shouldClone || grafanaDashboardModalMode === 'create'
+            ? values.definition?.trim() || grafanaDashboardDraftDefinition
+            : '',
+      }
+      const created = grafanaDashboardModalMode === 'edit' && editingGrafanaDashboard && !shouldClone
+        ? await api.put<GrafanaDashboardCreateResult>(
+            `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards/${editingGrafanaDashboard.uid}`,
+            payload,
+          )
+        : await api.post<GrafanaDashboardCreateResult>(
+          `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards`,
+          payload,
+        )
+      const nextCatalog = await refreshGrafanaCatalog(api, selectedGrafanaSourceId)
+      const targetFolderUID = created.folderUid || '__general__'
+      setExpandedGrafanaFolderKeys((current) =>
+        current.includes(targetFolderUID) ? current : [...current, targetFolderUID],
+      )
+      closeGrafanaDashboardModal()
+      message.success(
+        grafanaDashboardModalMode === 'edit' && !shouldClone
+          ? '仪表盘更新成功'
+          : shouldClone
+            ? '仪表盘克隆成功'
+            : '仪表盘创建成功',
+      )
+      const createdItem = nextCatalog
+        ? findGrafanaDashboardItem(nextCatalog.folders, created.uid, created.url)
+        : null
+      if (createdItem) {
+        openGrafanaDashboardViewer(createdItem)
+      }
+    } catch (error) {
+      if (
+        api &&
+        selectedGrafanaSourceId &&
+        grafanaDashboardModalMode === 'edit' &&
+        editingGrafanaDashboard &&
+        error instanceof HttpError &&
+        error.status === 400 &&
+        (error.message.includes('系统预置仪表盘') ||
+          error.message.includes('只读保护状态') ||
+          error.message.includes('Cannot save provisioned dashboard'))
+      ) {
+        try {
+          const values = await grafanaDashboardForm.validateFields()
+          const meta = await api.get<GrafanaDashboardMeta>(
+            `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards/${editingGrafanaDashboard.uid}/meta`,
+          )
+          const created = await api.post<GrafanaDashboardCreateResult>(
+            `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards`,
+            {
+              title: values.title.trim(),
+              folderUid: values.folderUid === '__general__' ? '' : values.folderUid || '',
+              tags: splitCommaSeparatedValues(values.tags),
+              definition: meta.definition,
+            },
+          )
+          const nextCatalog = await refreshGrafanaCatalog(api, selectedGrafanaSourceId)
+          const targetFolderUID = created.folderUid || '__general__'
+          setExpandedGrafanaFolderKeys((current) =>
+            current.includes(targetFolderUID) ? current : [...current, targetFolderUID],
+          )
+          closeGrafanaDashboardModal()
+          message.success('只读仪表盘已按自定义副本保存到目标目录')
+          const createdItem = nextCatalog
+            ? findGrafanaDashboardItem(nextCatalog.folders, created.uid, created.url)
+            : null
+          if (createdItem) {
+            openGrafanaDashboardViewer(createdItem)
+          }
+          return
+        } catch (cloneError) {
+          handleError(cloneError, '保存只读仪表盘副本失败')
+          return
+        }
+      }
+      handleError(
+        error,
+        grafanaDashboardModalMode === 'edit' && grafanaDashboardSubmitMode !== 'clone'
+          ? '更新仪表盘失败'
+          : grafanaDashboardModalMode === 'clone' || grafanaDashboardSubmitMode === 'clone'
+            ? '克隆仪表盘失败'
+            : '创建仪表盘失败',
+      )
+    } finally {
+      setGrafanaDashboardSubmitting(false)
+    }
+  }
+
+  function renameGrafanaFolder(folder: GrafanaDashboardFolder) {
+    openGrafanaFolderModal(folder)
+  }
+
+  function removeGrafanaFolder(folder: GrafanaDashboardFolder) {
+    if (!api || !selectedGrafanaSourceId || !folder.uid) {
+      return
+    }
+    modal.confirm({
+      title: `删除目录 · ${folder.title}`,
+      content:
+        folder.dashboardCount > 0
+          ? '目录下仍有仪表盘，请先迁移或删除目录内仪表盘。'
+          : '删除后该目录会从 Grafana 中移除。',
+      okButtonProps: { danger: true, disabled: folder.dashboardCount > 0, loading: deletingGrafanaFolderUid === folder.uid },
+      okText: '删除目录',
+      cancelText: '取消',
+      onOk: async () => {
+        setDeletingGrafanaFolderUid(folder.uid)
+        try {
+          await api.delete(`/observability/grafana-catalog/${selectedGrafanaSourceId}/folders/${folder.uid}`)
+          await refreshGrafanaCatalog(api, selectedGrafanaSourceId)
+          setExpandedGrafanaFolderKeys((current) => current.filter((item) => item !== folder.uid))
+          message.success('目录删除成功')
+        } catch (error) {
+          handleError(error, '删除目录失败')
+          throw error
+        } finally {
+          setDeletingGrafanaFolderUid('')
+        }
+      },
+    })
+  }
+
+  async function editGrafanaDashboard(item: GrafanaDashboardItem) {
+    if (!api || !selectedGrafanaSourceId) {
+      return
+    }
+    try {
+      const meta = await api.get<GrafanaDashboardMeta>(
+        `/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards/${item.uid}/meta`,
+      )
+      if (meta.provisioned || !meta.canSave) {
+        openGrafanaDashboardModal(meta.folderUid || '__general__', item, 'clone', meta.definition)
+        message.info('当前仪表盘处于只读保护状态，平台将按“保存为自定义副本”方式处理。')
+        return
+      }
+      openGrafanaDashboardModal(meta.folderUid || '__general__', item, 'edit', meta.definition)
+    } catch (error) {
+      handleError(error, '加载仪表盘信息失败')
+    }
+  }
+
+  function removeGrafanaDashboard(item: GrafanaDashboardItem) {
+    if (!api || !selectedGrafanaSourceId) {
+      return
+    }
+    modal.confirm({
+      title: `删除仪表盘 · ${item.title}`,
+      content: '删除后该仪表盘会从 Grafana 中移除。',
+      okButtonProps: { danger: true, loading: deletingGrafanaDashboardUid === item.uid },
+      okText: '删除仪表盘',
+      cancelText: '取消',
+      onOk: async () => {
+        setDeletingGrafanaDashboardUid(item.uid)
+        try {
+          await api.delete(`/observability/grafana-catalog/${selectedGrafanaSourceId}/dashboards/${item.uid}`)
+          await refreshGrafanaCatalog(api, selectedGrafanaSourceId)
+          if (selectedGrafanaDashboard?.uid === item.uid) {
+            setSelectedGrafanaDashboard(null)
+          }
+          message.success('仪表盘删除成功')
+        } catch (error) {
+          handleError(error, '删除仪表盘失败')
+          throw error
+        } finally {
+          setDeletingGrafanaDashboardUid('')
+        }
+      },
+    })
   }
 
   async function refreshInspection(client = api, clusterId = selectedClusterId) {
@@ -2878,8 +3761,7 @@ function Workspace() {
             <Button
               size="small"
               onClick={() => {
-                setSelectedGrafanaSourceId(item.id)
-                startTransition(() => setActiveView('observabilityDashboards'))
+                openObservabilityDashboardHome(item.id)
               }}
             >
               打开仪表盘
@@ -3370,6 +4252,239 @@ function Workspace() {
     )
   }
 
+  const renderAppTemplatesView = () => (
+    <div className="view-grid">
+      <section className="soft-panel section-block">
+        <div className="section-headline">
+          <div>
+            <Typography.Title level={4}>应用模版</Typography.Title>
+            <Typography.Text type="secondary">
+              选一个 Helm 模版，直接部署到目标集群和 namespace。
+            </Typography.Text>
+          </div>
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={() => void refreshAppTemplates(api)}>
+              刷新模版
+            </Button>
+          </Space>
+        </div>
+
+        <div className="toolbar-grid toolbar-grid-pair">
+          <Input.Search
+            allowClear
+            placeholder="按模版名、分类、Chart 搜索"
+            value={appTemplateSearch}
+            onChange={(event) => setAppTemplateSearch(event.target.value)}
+          />
+          <div className="context-inline-strip app-template-context-strip">
+            <span>{`${filteredAppTemplates.length} 个模版`}</span>
+            <span>{`${clusters.filter((item) => item.status === 'connected').length} 个可用集群`}</span>
+            {selectedCluster ? <span>{`当前集群 ${selectedCluster.name}`}</span> : null}
+          </div>
+        </div>
+      </section>
+
+      <section className="workspace-split app-template-workspace">
+        <div className="soft-panel section-block">
+          <div className="section-headline compact-headline">
+            <div>
+              <Typography.Title level={5}>模版目录</Typography.Title>
+              <Typography.Text type="secondary">
+                先选应用，再调整 release、Chart 与 values。
+              </Typography.Text>
+            </div>
+          </div>
+
+          {filteredAppTemplates.length > 0 ? (
+            <div className="app-template-grid">
+              {filteredAppTemplates.map((template) => (
+                <button
+                  key={template.key}
+                  type="button"
+                  className={`app-template-card${template.key === selectedAppTemplateKey ? ' is-active' : ''}`}
+                  onClick={() =>
+                    applyAppTemplatePreset(
+                      template,
+                      appTemplateForm.getFieldValue('clusterId') ?? selectedClusterId,
+                    )
+                  }
+                >
+                  <span className="surface-kicker">{template.category}</span>
+                  <strong>{template.label}</strong>
+                  <p>{template.description}</p>
+                  <div className="app-template-meta">
+                    <Tag>{template.chartName}</Tag>
+                    <span>{template.repoURL || 'KubeFeel 本地 Starter Chart'}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <Empty description="当前没有可用的应用模版" />
+          )}
+        </div>
+
+        <div className="soft-panel section-block">
+          <div className="section-headline compact-headline">
+            <div>
+              <Typography.Title level={5}>部署设置</Typography.Title>
+              <Typography.Text type="secondary">
+                支持 Helm install / upgrade，同名 release 会直接升级。
+              </Typography.Text>
+            </div>
+            {appTemplateDeployResult ? (
+              <Tag color="success">
+                {appTemplateDeployResult.operation === 'upgraded' ? '已升级' : '已部署'}
+              </Tag>
+            ) : null}
+          </div>
+
+          {clusters.length === 0 ? (
+            <Empty description="先接入一个可用集群" />
+          ) : (
+            <Form
+              layout="vertical"
+              form={appTemplateForm}
+              initialValues={{
+                clusterId: selectedClusterId,
+                createNamespace: false,
+              }}
+            >
+              <div className="app-template-form-grid">
+                <Form.Item
+                  name="clusterId"
+                  label="目标集群"
+                  rules={[{ required: true, message: '请选择目标集群' }]}
+                >
+                  <Select
+                    placeholder="选择部署集群"
+                    options={clusters.map((cluster) => ({
+                      label: `${cluster.name}${cluster.status === 'connected' ? '' : ' · API 异常'}`,
+                      value: cluster.id,
+                      disabled: cluster.status !== 'connected',
+                    }))}
+                    onChange={(value) => {
+                      setSelectedClusterId(value)
+                      setAppTemplateDeployResult(null)
+                    }}
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  name="namespace"
+                  label="目标 Namespace"
+                  rules={[{ required: true, message: '请输入或选择目标 Namespace' }]}
+                >
+                  <AutoComplete
+                    options={namespaces.map((item) => ({
+                      value: item.name,
+                      label: item.name,
+                    }))}
+                    placeholder="例如：default / apps / monitoring"
+                    filterOption={(inputValue, option) =>
+                      String(option?.value ?? '')
+                        .toLowerCase()
+                        .includes(inputValue.toLowerCase())
+                    }
+                  />
+                </Form.Item>
+              </div>
+
+              <Form.Item name="createNamespace" valuePropName="checked" className="switch-form-item">
+                <Switch checkedChildren="自动创建 Namespace" unCheckedChildren="已有 Namespace" />
+              </Form.Item>
+
+              <div className="app-template-form-grid">
+                <Form.Item
+                  name="releaseName"
+                  label="Release 名称"
+                  rules={[{ required: true, message: '请输入 Release 名称' }]}
+                >
+                  <Input placeholder="例如：nginx / prometheus / grafana" />
+                </Form.Item>
+                <Form.Item
+                  name="version"
+                  label="Chart 版本"
+                  extra="可留空，默认使用仓库中的最新稳定版本。"
+                >
+                  <Input placeholder="例如：15.9.0" />
+                </Form.Item>
+              </div>
+
+              <div className="app-template-form-grid">
+                <Form.Item
+                  name="repoURL"
+                  label="Helm 仓库地址"
+                  extra="内置本地模版可留空；远端 Chart 请填写可访问的 Helm 仓库地址。"
+                >
+                  <Input placeholder="例如：https://grafana.github.io/helm-charts" />
+                </Form.Item>
+                <Form.Item
+                  name="chartName"
+                  label="Chart 名称"
+                  rules={[{ required: true, message: '请输入 Chart 名称' }]}
+                >
+                  <Input placeholder="例如：nginx / redis / grafana" />
+                </Form.Item>
+              </div>
+
+              <Form.Item name="values" label="Values YAML">
+                <Input.TextArea
+                  autoSize={{ minRows: 16, maxRows: 22 }}
+                  className="code-editor"
+                  placeholder="按需调整 Helm values"
+                />
+              </Form.Item>
+
+              <div className="form-actions">
+                <Button
+                  onClick={() => {
+                    if (selectedAppTemplate) {
+                      applyAppTemplatePreset(
+                        selectedAppTemplate,
+                        appTemplateForm.getFieldValue('clusterId') ?? selectedClusterId,
+                      )
+                    }
+                  }}
+                >
+                  恢复模版默认值
+                </Button>
+                <Button
+                  type="primary"
+                  loading={appTemplateDeploying}
+                  onClick={() => void submitAppTemplateDeployment()}
+                >
+                  部署应用
+                </Button>
+              </div>
+            </Form>
+          )}
+
+          {appTemplateDeployResult ? (
+            <div className="app-template-result">
+              <Descriptions column={2} size="small">
+                <Descriptions.Item label="操作">
+                  {appTemplateDeployResult.operation === 'upgraded' ? '升级' : '部署'}
+                </Descriptions.Item>
+                <Descriptions.Item label="状态">{appTemplateDeployResult.status || '-'}</Descriptions.Item>
+                <Descriptions.Item label="Release">{appTemplateDeployResult.releaseName}</Descriptions.Item>
+                <Descriptions.Item label="Namespace">{appTemplateDeployResult.namespace}</Descriptions.Item>
+                <Descriptions.Item label="Chart">{appTemplateDeployResult.chart}</Descriptions.Item>
+                <Descriptions.Item label="Revision">{appTemplateDeployResult.revision}</Descriptions.Item>
+              </Descriptions>
+              {appTemplateDeployResult.notes ? (
+                <div className="app-template-result-notes">
+                  <strong>部署说明</strong>
+                  <pre>{appTemplateDeployResult.notes}</pre>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  )
+
   const renderResourcesView = () => (
     <div className="view-grid">
       <section className="soft-panel section-block">
@@ -3769,24 +4884,339 @@ function Workspace() {
     </div>
   )
 
+  const renderGrafanaViewer = () => (
+    <>
+      {grafanaEmbedError ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="外部页面暂时无法载入"
+          description={grafanaEmbedError}
+          className="grafana-immersive-alert"
+        />
+      ) : null}
+      <iframe
+        key={`${grafanaEmbedSrc}-${grafanaFrameNonce}`}
+        ref={grafanaFrameRef}
+        title={`grafana-${selectedGrafanaSource?.name ?? 'workspace'}`}
+        src={grafanaEmbedSrc}
+        className="grafana-frame"
+        style={grafanaEmbedError ? { display: 'none' } : undefined}
+        onLoad={() => {
+          const frame = grafanaFrameRef.current
+          if (!frame) {
+            return
+          }
+
+          try {
+            const text = frame.contentDocument?.body?.innerText?.trim() ?? ''
+            const locationPath = frame.contentWindow?.location?.pathname ?? ''
+            if (text.startsWith('{') && text.includes('"message"')) {
+              const parsed = JSON.parse(text) as { message?: string }
+              setGrafanaEmbedError(
+                normalizeGrafanaEmbedError(parsed.message || 'Grafana 代理返回异常响应'),
+              )
+              return
+            }
+            if (locationPath.includes('/login')) {
+              setGrafanaEmbedError('外部系统返回了登录页，请检查数据源账号密码，或开启匿名访问后再接入。')
+              return
+            }
+            setGrafanaEmbedError('')
+          } catch {
+            setGrafanaEmbedError('页面加载异常，请检查数据源配置和访问路径。')
+          }
+        }}
+      />
+    </>
+  )
+
+  const renderGrafanaCatalogDirectory = () => (
+    <div className="grafana-directory-shell">
+      <div className="grafana-directory-head">
+        <div className="grafana-directory-copy">
+          <Typography.Title level={3}>仪表盘</Typography.Title>
+        </div>
+        <div className="grafana-directory-actions">
+          <Input.Search
+            allowClear
+            className="grafana-directory-search"
+            placeholder="搜索目录、仪表盘或标签"
+            value={grafanaDashboardSearch}
+            onChange={(event) => setGrafanaDashboardSearch(event.target.value)}
+          />
+          <Select
+            className="grafana-directory-sort"
+            value={grafanaDashboardSortMode}
+            onChange={setGrafanaDashboardSortMode}
+            options={[
+              { label: '收藏优先', value: 'starred' },
+              { label: '名称升序', value: 'titleAsc' },
+              { label: '名称降序', value: 'titleDesc' },
+            ]}
+          />
+          {canWriteObservability ? (
+            <Space wrap>
+              <Button onClick={() => openGrafanaFolderModal()}>新建目录</Button>
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => openGrafanaDashboardModal()}>
+                新建仪表盘
+              </Button>
+            </Space>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grafana-directory-meta">
+        <span>{`${grafanaCatalogSnapshot?.folderCount ?? 0} 个目录`}</span>
+        <span>{`${filteredGrafanaDashboardCount} 个仪表盘`}</span>
+        <span>{`数据源：${selectedGrafanaSource?.name ?? '-'}`}</span>
+      </div>
+
+      {canWriteObservability ? (
+        <div className="grafana-bulk-toolbar">
+          <div className="grafana-bulk-toolbar-copy">
+            <strong>{selectedGrafanaDashboardItems.length > 0 ? `已选 ${selectedGrafanaDashboardItems.length} 项` : '批量操作'}</strong>
+            <span>
+              {selectedGrafanaDashboardItems.length > 0
+                ? '移动或保存副本'
+                : '多选后批量移动或保存副本'}
+            </span>
+          </div>
+          <Space wrap>
+            <Button onClick={selectAllVisibleGrafanaDashboards}>全选当前结果</Button>
+            <Button onClick={clearGrafanaDashboardSelection} disabled={selectedGrafanaDashboardItems.length === 0}>
+              清空选择
+            </Button>
+            <Button
+              onClick={() => openGrafanaBulkActionModal('move')}
+              disabled={selectedGrafanaDashboardItems.length === 0}
+            >
+              批量移动
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => openGrafanaBulkActionModal('clone')}
+              disabled={selectedGrafanaDashboardItems.length === 0}
+            >
+              批量保存副本
+            </Button>
+          </Space>
+        </div>
+      ) : null}
+
+      {grafanaCatalogLoading ? (
+        <div className="grafana-directory-loading">
+          <Spin />
+        </div>
+      ) : filteredGrafanaFolders.length > 0 ? (
+        <div className="grafana-folder-stack">
+          {filteredGrafanaFolders.map((folder) => (
+            <section
+              key={folder.uid || folder.title}
+              className={`grafana-folder-section${(deferredGrafanaDashboardSearch || expandedGrafanaFolderKeys.includes(folder.uid || '__general__')) ? ' is-expanded' : ''}`}
+            >
+              <header className="grafana-folder-header">
+                <button
+                  type="button"
+                  className="grafana-folder-trigger"
+                  onClick={() => toggleGrafanaFolder(folder)}
+                >
+                  <RightOutlined
+                    className={`grafana-folder-chevron${(deferredGrafanaDashboardSearch || expandedGrafanaFolderKeys.includes(folder.uid || '__general__')) ? ' is-expanded' : ''}`}
+                  />
+                  <div className="grafana-folder-title">
+                    <FolderOpenOutlined />
+                    <strong>{folder.title}</strong>
+                  </div>
+                </button>
+                <div className="grafana-folder-header-meta">
+                  <span>{`${folder.dashboardCount} 个仪表盘`}</span>
+                  <Space size={8} wrap>
+                    {canWriteObservability && folder.dashboards.length > 0 ? (
+                      <Checkbox
+                        checked={folder.dashboards.every((item) => selectedGrafanaDashboardSet.has(item.uid))}
+                        indeterminate={
+                          folder.dashboards.some((item) => selectedGrafanaDashboardSet.has(item.uid)) &&
+                          !folder.dashboards.every((item) => selectedGrafanaDashboardSet.has(item.uid))
+                        }
+                        onChange={(event) => toggleGrafanaFolderSelection(folder, event.target.checked)}
+                      >
+                        全选目录
+                      </Checkbox>
+                    ) : null}
+                    {canWriteObservability ? (
+                      <Button size="small" onClick={() => openGrafanaDashboardModal(folder.uid || '__general__')}>
+                        放入此目录
+                      </Button>
+                    ) : null}
+                    {canWriteObservability && !folder.isGeneral ? (
+                      <Button size="small" icon={<EditOutlined />} onClick={() => renameGrafanaFolder(folder)}>
+                        重命名
+                      </Button>
+                    ) : null}
+                    {canWriteObservability && !folder.isGeneral ? (
+                      <Button
+                        size="small"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() => removeGrafanaFolder(folder)}
+                      >
+                        删除
+                      </Button>
+                    ) : null}
+                  </Space>
+                </div>
+              </header>
+
+              {(deferredGrafanaDashboardSearch || expandedGrafanaFolderKeys.includes(folder.uid || '__general__')) ? (
+                <div className="grafana-dashboard-list">
+                  {folder.dashboards.map((item) => (
+                    <div
+                      key={item.uid || item.url}
+                      className="grafana-dashboard-row"
+                    >
+                      {canWriteObservability ? (
+                        <Checkbox
+                          className="grafana-dashboard-check"
+                          checked={selectedGrafanaDashboardSet.has(item.uid)}
+                          onChange={(event) => toggleGrafanaDashboardSelection(item, event.target.checked)}
+                        />
+                      ) : null}
+                      <button
+                        type="button"
+                        className="grafana-dashboard-row-body"
+                        onClick={() => openGrafanaDashboardViewer(item)}
+                      >
+                        <div className="grafana-dashboard-row-main">
+                          <div className="grafana-dashboard-row-title">
+                            <FundProjectionScreenOutlined />
+                            <span>{item.title}</span>
+                            {item.isStarred ? <StarFilled className="grafana-dashboard-star" /> : null}
+                          </div>
+                          <div className="grafana-dashboard-row-tags">
+                            {item.tags.length > 0 ? (
+                              item.tags.map((tag) => (
+                                <span key={tag} className="context-chip">
+                                  {tag}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="context-chip subtle-chip">无标签</span>
+                            )}
+                          </div>
+                        </div>
+                        <span className="grafana-dashboard-open">进入画布</span>
+                      </button>
+                      <div className="grafana-dashboard-row-tail">
+                        {canWriteObservability ? (
+                          <Space size={8}>
+                            <Button
+                              size="small"
+                              icon={<EditOutlined />}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                editGrafanaDashboard(item)
+                              }}
+                            >
+                              编辑
+                            </Button>
+                            <Button
+                              size="small"
+                              danger
+                              icon={<DeleteOutlined />}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                removeGrafanaDashboard(item)
+                              }}
+                            >
+                              删除
+                            </Button>
+                          </Space>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          ))}
+        </div>
+      ) : (
+        <Empty description="当前没有可展示的仪表盘" />
+      )}
+    </div>
+  )
+
+  const renderGrafanaExploreEntry = () => (
+    <div className="grafana-entry-shell">
+      <div className="grafana-entry-hero">
+        <span className="context-chip-label">指标探索</span>
+        <Typography.Title level={2}>先进入探索入口，再开始即席分析</Typography.Title>
+        <Typography.Text type="secondary">
+          平台先收住入口信息，再进入外部探索台，避免直接暴露原始首页。
+        </Typography.Text>
+      </div>
+
+      <div className="grafana-entry-points">
+        <div className="grafana-entry-point">
+          <CompassOutlined />
+          <div>
+            <strong>即席查询</strong>
+            <span>适合快速核对指标、标签和值的变化。</span>
+          </div>
+        </div>
+        <div className="grafana-entry-point">
+          <AppstoreOutlined />
+          <div>
+            <strong>统一入口</strong>
+            <span>继续沿用平台登录态和当前工作区视觉，不直接暴露外部首页。</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grafana-entry-actions">
+        <Button
+          type="primary"
+          size="large"
+          icon={<CompassOutlined />}
+          onClick={() => setGrafanaExploreActive(true)}
+        >
+          进入探索台
+        </Button>
+        {grafanaExternalHref ? (
+          <Button size="large" href={grafanaExternalHref} target="_blank" rel="noreferrer">
+            打开外部原页
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  )
+
   const renderObservabilityDashboardView = () => (
     <div className="grafana-immersive-shell">
       {selectedGrafanaSource ? (
         <div className="grafana-immersive-toolbar">
           <div className="grafana-immersive-toolbar-main">
-            <span className="grafana-immersive-kicker">Grafana</span>
             <Segmented<GrafanaWorkspaceSection>
               className="grafana-immersive-nav"
               options={[
-                { label: 'Dashboard', value: 'dashboard' },
-                { label: 'Explore', value: 'explore' },
+                { label: '仪表盘', value: 'dashboard' },
+                { label: '指标探索', value: 'explore' },
               ]}
               value={grafanaWorkspaceSection}
-              onChange={(value) => setGrafanaWorkspaceSection(value)}
+              onChange={(value) => {
+                setGrafanaWorkspaceSection(value)
+                if (value === 'explore') {
+                  setGrafanaEmbedError('')
+                  return
+                }
+                setGrafanaExploreActive(false)
+                setGrafanaEmbedError('')
+              }}
             />
             <Select
               className="grafana-immersive-select"
-              placeholder="选择 Grafana"
+              placeholder="选择观测入口"
               value={selectedGrafanaSourceId}
               onChange={setSelectedGrafanaSourceId}
               options={grafanaSources.map((item) => ({
@@ -3796,17 +5226,36 @@ function Workspace() {
             />
           </div>
           <Space className="grafana-immersive-actions">
+            {grafanaWorkspaceSection === 'dashboard' && selectedGrafanaDashboard ? (
+              <Button icon={<ArrowLeftOutlined />} onClick={() => setSelectedGrafanaDashboard(null)}>
+                返回目录
+              </Button>
+            ) : null}
+            {grafanaWorkspaceSection === 'explore' && grafanaExploreActive ? (
+              <Button icon={<ArrowLeftOutlined />} onClick={openGrafanaExploreEntry}>
+                返回入口
+              </Button>
+            ) : null}
             <Button
               onClick={() => {
+                if (grafanaWorkspaceSection === 'dashboard' && !selectedGrafanaDashboard && selectedGrafanaSourceId) {
+                  setGrafanaCatalogCache((current) => {
+                    const next = { ...current }
+                    delete next[selectedGrafanaSourceId]
+                    return next
+                  })
+                  void refreshGrafanaCatalog(api, selectedGrafanaSourceId)
+                  return
+                }
                 setGrafanaEmbedError('')
                 setGrafanaFrameNonce((current) => current + 1)
               }}
             >
-              刷新画布
+              刷新
             </Button>
             {grafanaExternalHref ? (
               <Button type="primary" href={grafanaExternalHref} target="_blank" rel="noreferrer">
-                打开原版 Grafana
+                打开原页
               </Button>
             ) : null}
           </Space>
@@ -3815,50 +5264,13 @@ function Workspace() {
 
       <section className="grafana-immersive-stage">
         {selectedGrafanaSource ? (
-          <>
-            {grafanaEmbedError ? (
-              <Alert
-                type="warning"
-                showIcon
-                message="Grafana 页面暂时无法内嵌"
-                description={grafanaEmbedError}
-                className="grafana-immersive-alert"
-              />
-            ) : null}
-            <iframe
-              key={`${grafanaEmbedSrc}-${grafanaFrameNonce}`}
-              ref={grafanaFrameRef}
-              title={`grafana-${selectedGrafanaSource.name}`}
-              src={grafanaEmbedSrc}
-              className="grafana-frame"
-              style={grafanaEmbedError ? { display: 'none' } : undefined}
-              onLoad={() => {
-                const frame = grafanaFrameRef.current
-                if (!frame) {
-                  return
-                }
-
-                try {
-                  const text = frame.contentDocument?.body?.innerText?.trim() ?? ''
-                  const locationPath = frame.contentWindow?.location?.pathname ?? ''
-                  if (text.startsWith('{') && text.includes('"message"')) {
-                    const parsed = JSON.parse(text) as { message?: string }
-                    setGrafanaEmbedError(
-                      normalizeGrafanaEmbedError(parsed.message || 'Grafana 代理返回异常响应'),
-                    )
-                    return
-                  }
-                  if (locationPath.includes('/login')) {
-                    setGrafanaEmbedError('Grafana 返回了登录页，请检查数据源账号密码，或开启匿名访问后再接入。')
-                    return
-                  }
-                  setGrafanaEmbedError('')
-                } catch {
-                  setGrafanaEmbedError('Grafana 页面加载异常，请检查数据源配置和访问路径。')
-                }
-              }}
-            />
-          </>
+          grafanaWorkspaceSection === 'dashboard' ? (
+            selectedGrafanaDashboard ? renderGrafanaViewer() : renderGrafanaCatalogDirectory()
+          ) : grafanaExploreActive ? (
+            renderGrafanaViewer()
+          ) : (
+            renderGrafanaExploreEntry()
+          )
         ) : (
           <div className="soft-panel section-block grafana-empty-state">
             <Empty description="先在数据源中接入一个 Grafana" />
@@ -4234,6 +5646,8 @@ function Workspace() {
         return renderClustersView()
       case 'inspection':
         return renderInspectionView()
+      case 'appTemplates':
+        return renderAppTemplatesView()
       case 'resources':
         return renderResourcesView()
       case 'registryIntegrations':
@@ -4278,6 +5692,10 @@ function Workspace() {
             selectedKeys={[activeView]}
             items={menuItems}
             onClick={(event) => {
+              if (event.key === 'observabilityDashboards') {
+                openObservabilityDashboardHome()
+                return
+              }
               startTransition(() => {
                 setActiveView(event.key as ViewKey)
               })
@@ -5403,6 +6821,193 @@ function Workspace() {
         </div>
       </Modal>
 
+      <Modal
+        title={editingGrafanaFolder ? `重命名目录 · ${editingGrafanaFolder.title}` : '新建目录'}
+        open={grafanaFolderModalOpen}
+        onCancel={closeGrafanaFolderModal}
+        onOk={() => void submitGrafanaFolder()}
+        okText={editingGrafanaFolder ? '保存目录' : '创建目录'}
+        okButtonProps={{ loading: grafanaFolderSubmitting }}
+        width={560}
+      >
+        <Form layout="vertical" form={grafanaFolderForm}>
+          <Form.Item
+            name="title"
+            label="目录名称"
+            rules={[{ required: true, message: '请输入目录名称' }]}
+          >
+            <Input placeholder="例如：业务总览 / 成本分析 / 平台巡检" />
+          </Form.Item>
+        </Form>
+        <Typography.Text type="secondary">
+          新目录会直接创建到当前 Grafana 数据源下，随后可在创建仪表盘时选择归属目录。
+        </Typography.Text>
+      </Modal>
+
+      <Modal
+        title={
+          grafanaDashboardSubmitAsClone && editingGrafanaDashboard
+            ? `保存副本 · ${editingGrafanaDashboard.title}`
+            : editingGrafanaDashboard
+              ? `编辑仪表盘 · ${editingGrafanaDashboard.title}`
+              : '新建仪表盘'
+        }
+        open={grafanaDashboardModalOpen}
+        onCancel={closeGrafanaDashboardModal}
+        onOk={() => void submitGrafanaDashboard()}
+        okText={
+          grafanaDashboardSubmitAsClone
+            ? '保存副本'
+            : editingGrafanaDashboard
+              ? '保存仪表盘'
+              : '创建仪表盘'
+        }
+        okButtonProps={{ loading: grafanaDashboardSubmitting }}
+        width={920}
+      >
+        <div className="modal-split">
+          <Form layout="vertical" form={grafanaDashboardForm}>
+            <Form.Item
+              name="title"
+              label="仪表盘名称"
+              rules={[{ required: true, message: '请输入仪表盘名称' }]}
+            >
+              <Input placeholder="例如：订单链路总览" />
+            </Form.Item>
+            {editingGrafanaDashboard ? (
+              <Form.Item label="保存方式">
+                <Segmented
+                  block
+                  options={[
+                    {
+                      label: '移动原仪表盘',
+                      value: 'move',
+                      disabled: grafanaDashboardCloneLocked,
+                    },
+                    {
+                      label: grafanaDashboardCloneLocked ? '只读仪表盘仅支持副本' : '另存为副本',
+                      value: 'clone',
+                    },
+                  ]}
+                  value={grafanaDashboardCloneLocked ? 'clone' : grafanaDashboardSubmitMode}
+                  onChange={(value) =>
+                    changeGrafanaDashboardSubmitMode(
+                      value === 'clone' ? 'clone' : 'move',
+                    )
+                  }
+                />
+              </Form.Item>
+            ) : null}
+            <Form.Item name="folderUid" label="目录">
+              <Select options={grafanaFolderOptions} />
+            </Form.Item>
+            <Form.Item name="tags" label="标签">
+              <Input placeholder="多个标签用逗号分隔，例如：biz, ops, prod" />
+            </Form.Item>
+            {!editingGrafanaDashboard ? (
+              <Form.Item name="definition" label="Dashboard JSON">
+                <Input.TextArea
+                  className="grafana-json-textarea"
+                  rows={14}
+                  placeholder={`支持直接粘贴 Grafana dashboard JSON。\n留空时，平台会先创建一个基础骨架仪表盘。`}
+                />
+              </Form.Item>
+            ) : null}
+          </Form>
+
+          <aside className="modal-aside">
+            <Typography.Title level={5}>创建说明</Typography.Title>
+            <Typography.Text type="secondary">
+              当前数据源：{selectedGrafanaSource?.name ?? '-'}。
+            </Typography.Text>
+            <Divider />
+            <div className="inspector-stack">
+              <div className="identity-block compact-identity-block">
+                <strong>目录归属</strong>
+                <span>可选未分组，也可放到你新建的业务目录中。</span>
+              </div>
+              <div className="identity-block compact-identity-block">
+                <strong>JSON 导入</strong>
+                <span>
+                  {grafanaDashboardCloneLocked
+                    ? '当前仪表盘处于只读保护状态，平台会复制当前内容，再作为自定义副本保存到你选的目录中。'
+                    : grafanaDashboardSubmitAsClone
+                    ? '平台会复制当前仪表盘内容，并按副本保存到你选的目录中。'
+                    : editingGrafanaDashboard
+                    ? '当前编辑支持改名、改标签、改目录，不会覆盖已有图表内容。'
+                    : '支持 Grafana 导出的完整对象，也支持仅粘贴 dashboard 本体。'}
+                </span>
+              </div>
+              <div className="identity-block compact-identity-block">
+                <strong>{editingGrafanaDashboard ? '保存结果' : '空白骨架'}</strong>
+                <span>
+                  {grafanaDashboardCloneLocked
+                    ? '当前仪表盘处于只读保护状态，只支持保存为你自己的自定义副本。'
+                    : grafanaDashboardSubmitAsClone
+                    ? '平台会保留当前内容，按新副本保存到你选择的目录中。'
+                    : editingGrafanaDashboard
+                    ? '已有仪表盘会保留原始查询和面板，只更新元信息。'
+                    : '如果先不贴 JSON，平台会生成一个可继续编辑的基础仪表盘。'}
+                </span>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </Modal>
+
+      <Modal
+        title={grafanaBulkActionMode === 'move' ? '批量移动仪表盘' : '批量保存仪表盘副本'}
+        open={grafanaBulkActionOpen}
+        onCancel={closeGrafanaBulkActionModal}
+        onOk={() => void submitGrafanaBulkAction()}
+        okText={grafanaBulkActionMode === 'move' ? '开始移动' : '开始保存副本'}
+        okButtonProps={{ loading: grafanaBulkActionSubmitting }}
+        width={720}
+      >
+        <div className="modal-split">
+          <Form layout="vertical" form={grafanaBulkActionForm}>
+            <Form.Item name="folderUid" label="目标目录">
+              <Select options={grafanaFolderOptions} />
+            </Form.Item>
+            {grafanaBulkActionMode === 'clone' ? (
+              <Form.Item
+                name="cloneSuffix"
+                label="副本后缀"
+                rules={[{ required: true, message: '请输入副本后缀' }]}
+              >
+                <Input placeholder="例如：副本 / 备份 / 演练" />
+              </Form.Item>
+            ) : null}
+          </Form>
+
+          <aside className="modal-aside">
+            <Typography.Title level={5}>批量说明</Typography.Title>
+            <Typography.Text type="secondary">
+              当前已选：{selectedGrafanaDashboardItems.length} 个仪表盘。
+            </Typography.Text>
+            <Divider />
+            <div className="inspector-stack">
+              <div className="identity-block compact-identity-block">
+                <strong>执行动作</strong>
+                <span>
+                  {grafanaBulkActionMode === 'move'
+                    ? '只会移动可编辑的自定义仪表盘；只读仪表盘会自动跳过。'
+                    : '平台会逐个复制当前仪表盘，并放入你选择的目标目录。'}
+                </span>
+              </div>
+              <div className="identity-block compact-identity-block">
+                <strong>目标目录</strong>
+                <span>可统一调整到未分组，也可以批量归档进同一个业务目录。</span>
+              </div>
+              <div className="identity-block compact-identity-block">
+                <strong>批量对象</strong>
+                <span>{selectedGrafanaDashboardItems.map((item) => item.title).join('、') || '未选择'}</span>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </Modal>
+
       <Drawer
         title={resourceDetailResource ? `资源详情 · ${resourceName(resourceDetailResource)}` : '资源详情'}
         width={640}
@@ -5997,6 +7602,8 @@ function viewTitle(view: ViewKey) {
       return '集群列表'
     case 'inspection':
       return '一键巡检'
+    case 'appTemplates':
+      return '应用模版'
     case 'resources':
       return '资源中心'
     case 'registryIntegrations':
@@ -6036,12 +7643,41 @@ function buildGrafanaExternalHref(endpoint: string, rawPath: string) {
   return `${base}${path}`
 }
 
-function buildGrafanaWorkspacePath(rawPath: string, section: GrafanaWorkspaceSection) {
-  if (section === 'explore') {
+function buildGrafanaWorkspacePath(input: {
+  section: GrafanaWorkspaceSection
+  defaultPath: string
+  selectedDashboardUrl?: string
+  exploreActive: boolean
+}) {
+  if (input.section === 'explore') {
+    return input.exploreActive ? '/explore' : ''
+  }
+
+  if (input.selectedDashboardUrl) {
+    return normalizeGrafanaPath(input.selectedDashboardUrl)
+  }
+
+  const normalized = normalizeGrafanaPath(input.defaultPath)
+  if (normalized === '/' || normalized === '/login') {
+    return '/dashboards'
+  }
+  return normalized
+}
+
+function buildGrafanaExternalPath(input: {
+  section: GrafanaWorkspaceSection
+  defaultPath: string
+  selectedDashboardUrl?: string
+}) {
+  if (input.section === 'explore') {
     return '/explore'
   }
 
-  const normalized = normalizeGrafanaPath(rawPath)
+  if (input.selectedDashboardUrl) {
+    return normalizeGrafanaPath(input.selectedDashboardUrl)
+  }
+
+  const normalized = normalizeGrafanaPath(input.defaultPath)
   if (normalized === '/' || normalized === '/login') {
     return '/dashboards'
   }
@@ -6100,6 +7736,96 @@ function normalizeGrafanaPath(rawPath: string) {
     }
   }
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+}
+
+function splitCommaSeparatedValues(raw?: string) {
+  if (!raw) {
+    return []
+  }
+
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function findGrafanaDashboardItem(
+  folders: GrafanaDashboardFolder[],
+  uid: string,
+  url: string,
+) {
+  const normalizedUID = uid.trim()
+  const normalizedURL = normalizeGrafanaPath(url)
+  for (const folder of folders) {
+    for (const item of folder.dashboards) {
+      if (normalizedUID && item.uid === normalizedUID) {
+        return item
+      }
+      if (normalizedURL && normalizeGrafanaPath(item.url) === normalizedURL) {
+        return item
+      }
+    }
+  }
+  return null
+}
+
+function sortGrafanaCatalogFolders(
+  folders: GrafanaDashboardFolder[],
+  mode: GrafanaDashboardSortMode,
+) {
+  return folders.map((folder) => {
+    const dashboards = [...(folder.dashboards ?? [])]
+    dashboards.sort((left, right) => {
+      if (mode === 'starred' && left.isStarred !== right.isStarred) {
+        return left.isStarred ? -1 : 1
+      }
+      if (mode === 'titleDesc') {
+        return right.title.localeCompare(left.title, 'zh-Hans-CN')
+      }
+      return left.title.localeCompare(right.title, 'zh-Hans-CN')
+    })
+
+    return {
+      ...folder,
+      dashboards,
+      dashboardCount: dashboards.length,
+    }
+  })
+}
+
+function filterGrafanaCatalogFolders(folders: GrafanaDashboardFolder[], rawSearch: string) {
+  const keyword = rawSearch.trim().toLowerCase()
+  if (!keyword) {
+    return folders.map((folder) => ({
+      ...folder,
+      dashboards: folder.dashboards ?? [],
+      dashboardCount: (folder.dashboards ?? []).length,
+    }))
+  }
+
+  return folders
+    .map((folder) => {
+      const dashboardsSource = folder.dashboards ?? []
+      if (folder.title.toLowerCase().includes(keyword)) {
+        return {
+          ...folder,
+          dashboards: dashboardsSource,
+          dashboardCount: dashboardsSource.length,
+        }
+      }
+
+      const dashboards = dashboardsSource.filter((item) => {
+        const haystacks = [item.title, item.folderTitle, ...(item.tags ?? [])]
+        return haystacks.some((entry) => entry?.toLowerCase().includes(keyword))
+      })
+
+      return {
+        ...folder,
+        dashboards,
+        dashboardCount: dashboards.length,
+      }
+    })
+    .filter((folder) => folder.dashboards.length > 0)
 }
 
 function pickCurrentOrFirstId(ids: number[], current?: number) {

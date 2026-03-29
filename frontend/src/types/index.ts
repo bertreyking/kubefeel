@@ -191,6 +191,44 @@ export type ObservabilitySource = {
   dashboardReady: boolean
 }
 
+export type GrafanaDashboardItem = {
+  uid: string
+  title: string
+  url: string
+  folderUid: string
+  folderTitle: string
+  tags: string[]
+  isStarred: boolean
+}
+
+export type GrafanaDashboardFolder = {
+  uid: string
+  title: string
+  isGeneral: boolean
+  dashboardCount: number
+  dashboards: GrafanaDashboardItem[]
+}
+
+export type GrafanaDashboardCatalog = {
+  folders: GrafanaDashboardFolder[]
+  folderCount: number
+  dashboardCount: number
+  loadedAt?: string
+}
+
+export type GrafanaDashboardMeta = {
+  uid: string
+  title: string
+  url: string
+  folderUid: string
+  folderTitle: string
+  tags: string[]
+  provisioned: boolean
+  canSave: boolean
+  canDelete: boolean
+  definition: string
+}
+
 export type ClusterProvisionCheckItem = {
   key: string
   label: string
@@ -274,6 +312,30 @@ export type ResourceDefinition = {
   kind: string
   apiVersion: string
   namespaced: boolean
+}
+
+export type AppTemplate = {
+  key: string
+  label: string
+  description: string
+  category: string
+  repoURL: string
+  chartName: string
+  defaultVersion?: string
+  releaseNameHint: string
+  namespaceHint: string
+  values: string
+}
+
+export type AppTemplateDeployResult = {
+  operation: string
+  releaseName: string
+  namespace: string
+  chart: string
+  version: string
+  revision: number
+  status: string
+  notes?: string
 }
 
 export type DashboardSummary = {

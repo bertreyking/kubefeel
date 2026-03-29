@@ -673,6 +673,114 @@
   font-size: 0.9rem;
 }
 
+.app-template-context-strip {
+  justify-content: flex-end;
+  padding-top: 0;
+}
+
+.app-template-workspace {
+  grid-template-columns: minmax(320px, 0.92fr) minmax(420px, 1.08fr);
+}
+
+.app-template-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.app-template-card {
+  display: grid;
+  gap: 10px;
+  padding: 18px 20px;
+  border-radius: 20px;
+  border: 1px solid rgba(16, 32, 43, 0.08);
+  background: linear-gradient(180deg, rgba(248, 251, 252, 0.96), rgba(239, 245, 247, 0.94));
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+
+.app-template-card strong {
+  color: #10202b;
+  font-size: 1rem;
+}
+
+.app-template-card p {
+  margin: 0;
+  color: #627883;
+  line-height: 1.65;
+}
+
+.app-template-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(15, 108, 123, 0.24);
+  box-shadow: 0 12px 28px rgba(15, 108, 123, 0.08);
+}
+
+.app-template-card.is-active {
+  border-color: rgba(15, 108, 123, 0.28);
+  background: linear-gradient(180deg, rgba(241, 251, 252, 0.98), rgba(231, 244, 247, 0.94));
+  box-shadow: 0 14px 30px rgba(15, 108, 123, 0.12);
+}
+
+.app-template-meta {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  color: #67808e;
+  font-size: 0.84rem;
+  word-break: break-all;
+}
+
+.app-template-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.switch-form-item {
+  margin-bottom: 18px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.app-template-result {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(16, 32, 43, 0.08);
+}
+
+.app-template-result-notes {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.app-template-result-notes strong {
+  color: #10202b;
+}
+
+.app-template-result-notes pre {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(238, 244, 247, 0.9);
+  border: 1px solid rgba(16, 32, 43, 0.08);
+  color: #364955;
+  font-family: "SFMono-Regular", "IBM Plex Mono", monospace;
+  font-size: 0.84rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .registry-space-grid {
   display: grid;
   gap: 16px;
@@ -1045,6 +1153,314 @@
   left: 18px;
   right: 18px;
   z-index: 9;
+}
+
+.grafana-directory-shell,
+.grafana-entry-shell {
+  min-height: calc(100vh - 96px);
+  padding: 22px 28px 28px;
+}
+
+.grafana-directory-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.grafana-directory-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.grafana-directory-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.grafana-directory-copy h3,
+.grafana-entry-hero h2 {
+  margin: 0 !important;
+}
+
+.grafana-directory-search {
+  width: min(320px, 38vw);
+}
+
+.grafana-directory-sort {
+  min-width: 132px;
+}
+
+.grafana-directory-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+  color: #5f7282;
+  font-size: 0.88rem;
+}
+
+.grafana-bulk-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border: 1px solid rgba(15, 108, 123, 0.12);
+  border-radius: 16px;
+  background: rgba(15, 108, 123, 0.05);
+}
+
+.grafana-bulk-toolbar-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.grafana-bulk-toolbar-copy strong {
+  color: #16202b;
+  font-size: 0.94rem;
+}
+
+.grafana-bulk-toolbar-copy span {
+  color: #5f7282;
+  font-size: 0.86rem;
+}
+
+.grafana-directory-loading {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+}
+
+.grafana-folder-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.grafana-folder-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.grafana-folder-section.is-expanded {
+  gap: 12px;
+}
+
+.grafana-folder-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(16, 32, 43, 0.08);
+  color: #5f7282;
+}
+
+.grafana-folder-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.grafana-folder-trigger {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.grafana-folder-chevron {
+  color: #6e808f;
+  transition: transform 160ms ease;
+}
+
+.grafana-folder-chevron.is-expanded {
+  transform: rotate(90deg);
+}
+
+.grafana-folder-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #16202b;
+}
+
+.grafana-folder-title strong {
+  font-size: 1rem;
+}
+
+.grafana-dashboard-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.grafana-dashboard-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 12px 4px;
+  border: 0;
+  border-bottom: 1px solid rgba(16, 32, 43, 0.06);
+  background: transparent;
+  text-align: left;
+  transition:
+    transform 160ms ease,
+    background-color 160ms ease;
+}
+
+.grafana-dashboard-row:hover {
+  transform: translateX(4px);
+  background: rgba(15, 108, 123, 0.04);
+}
+
+.grafana-dashboard-check {
+  flex-shrink: 0;
+}
+
+.grafana-dashboard-row-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.grafana-dashboard-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.grafana-dashboard-row-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #16202b;
+  font-weight: 600;
+}
+
+.grafana-dashboard-row-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grafana-dashboard-star {
+  color: #d99100;
+}
+
+.grafana-dashboard-row-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.subtle-chip {
+  background: rgba(16, 32, 43, 0.05);
+  color: #6e808f;
+}
+
+.grafana-dashboard-open {
+  color: #0f6c7b;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.grafana-dashboard-row-tail {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.grafana-entry-shell {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 28px;
+}
+
+.grafana-entry-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 760px;
+}
+
+.grafana-entry-points {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.grafana-entry-point {
+  display: flex;
+  gap: 14px;
+  padding: 18px 0;
+  border-top: 1px solid rgba(16, 32, 43, 0.08);
+}
+
+.grafana-entry-point svg {
+  margin-top: 3px;
+  color: #0f6c7b;
+  font-size: 1.1rem;
+}
+
+.grafana-entry-point div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.grafana-entry-point strong {
+  color: #16202b;
+}
+
+.grafana-entry-point span {
+  color: #5f7282;
+  line-height: 1.6;
+}
+
+.grafana-entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.grafana-json-textarea textarea {
+  font-family:
+    "SFMono-Regular",
+    "SF Mono",
+    "IBM Plex Mono",
+    Consolas,
+    "Liberation Mono",
+    monospace;
+  line-height: 1.55;
 }
 
 .grafana-empty-state {
@@ -1735,6 +2151,7 @@
 }
 
 @media (max-width: 1280px) {
+  .app-template-workspace,
   .workspace-split,
   .split-panel,
   .dashboard-capacity-grid,
@@ -1768,6 +2185,7 @@
   .inspection-summary-grid,
   .inspection-item-grid,
   .toolbar-grid,
+  .app-template-form-grid,
   .provision-form-grid,
   .provision-job-grid,
   .provision-check-grid,
@@ -1809,8 +2227,51 @@
     align-items: stretch;
   }
 
+  .grafana-directory-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .grafana-directory-actions {
+    justify-content: stretch;
+  }
+
   .grafana-immersive-select {
     min-width: 100%;
+  }
+
+  .grafana-directory-search {
+    width: 100%;
+  }
+
+  .grafana-directory-sort {
+    width: 100%;
+  }
+
+  .grafana-bulk-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .grafana-folder-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .grafana-folder-header-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .grafana-dashboard-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .grafana-dashboard-row-body,
+  .grafana-dashboard-row-tail {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .grafana-immersive-actions {
@@ -1848,6 +2309,15 @@
 
   .grafana-immersive-shell {
     padding: 14px 14px 18px;
+  }
+
+  .grafana-directory-shell,
+  .grafana-entry-shell {
+    padding: 22px 18px 24px;
+  }
+
+  .grafana-entry-points {
+    grid-template-columns: 1fr;
   }
 
   .grafana-frame {

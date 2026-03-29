@@ -74,6 +74,7 @@ func (s *Server) Run() error {
 
 		api.GET("/catalog/permissions", s.requirePermission(rbac.PermissionRolesRead), s.permissionCatalog)
 		api.GET("/catalog/resource-types", s.requirePermission(rbac.PermissionResourcesRead), s.resourceCatalog)
+		api.GET("/catalog/app-templates", s.requirePermission(rbac.PermissionResourcesRead), s.appTemplateCatalog)
 		api.GET("/catalog/provision-templates", s.requirePermission(rbac.PermissionClustersWrite), s.provisionTemplateCatalog)
 		api.GET("/catalog/image-registry-presets", s.requirePermission(rbac.PermissionClustersWrite), s.imageRegistryPresetCatalog)
 		api.GET("/catalog/repository-providers", s.requirePermission(rbac.PermissionRegistriesRead), s.repositoryProviderCatalog)
@@ -99,6 +100,7 @@ func (s *Server) Run() error {
 		api.POST("/clusters/:id/resources/:resourceType", s.requirePermission(rbac.PermissionResourcesWrite), s.createResource)
 		api.PUT("/clusters/:id/resources/:resourceType/:name", s.requirePermission(rbac.PermissionResourcesWrite), s.updateResource)
 		api.DELETE("/clusters/:id/resources/:resourceType/:name", s.requirePermission(rbac.PermissionResourcesWrite), s.deleteResource)
+		api.POST("/app-templates/deploy", s.requirePermission(rbac.PermissionResourcesWrite), s.deployAppTemplate)
 
 		api.GET("/users", s.requirePermission(rbac.PermissionUsersRead), s.listUsers)
 		api.POST("/users", s.requirePermission(rbac.PermissionUsersWrite), s.createUser)
@@ -125,6 +127,14 @@ func (s *Server) Run() error {
 		api.POST("/observability/sources", s.requirePermission(rbac.PermissionObservabilityWrite), s.createObservabilitySource)
 		api.PUT("/observability/sources/:id", s.requirePermission(rbac.PermissionObservabilityWrite), s.updateObservabilitySource)
 		api.DELETE("/observability/sources/:id", s.requirePermission(rbac.PermissionObservabilityWrite), s.deleteObservabilitySource)
+		api.GET("/observability/grafana-catalog/:id", s.requirePermission(rbac.PermissionObservabilityRead), s.listGrafanaCatalog)
+		api.POST("/observability/grafana-catalog/:id/folders", s.requirePermission(rbac.PermissionObservabilityWrite), s.createGrafanaFolder)
+		api.PUT("/observability/grafana-catalog/:id/folders/:folderUid", s.requirePermission(rbac.PermissionObservabilityWrite), s.updateGrafanaFolder)
+		api.DELETE("/observability/grafana-catalog/:id/folders/:folderUid", s.requirePermission(rbac.PermissionObservabilityWrite), s.deleteGrafanaFolder)
+		api.POST("/observability/grafana-catalog/:id/dashboards", s.requirePermission(rbac.PermissionObservabilityWrite), s.createGrafanaDashboard)
+		api.GET("/observability/grafana-catalog/:id/dashboards/:dashboardUid/meta", s.requirePermission(rbac.PermissionObservabilityRead), s.getGrafanaDashboardMeta)
+		api.PUT("/observability/grafana-catalog/:id/dashboards/:dashboardUid", s.requirePermission(rbac.PermissionObservabilityWrite), s.updateGrafanaDashboard)
+		api.DELETE("/observability/grafana-catalog/:id/dashboards/:dashboardUid", s.requirePermission(rbac.PermissionObservabilityWrite), s.deleteGrafanaDashboard)
 		api.Any("/observability/grafana/:id/*proxyPath", s.requirePermission(rbac.PermissionObservabilityRead), s.proxyGrafana)
 	}
 

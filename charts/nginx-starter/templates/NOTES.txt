@@ -1,0 +1,5 @@
+1. 查看 Deployment
+   kubectl get deploy -n {{ .Release.Namespace }} {{ include "kubefeel-nginx-starter.fullname" . }}
+
+2. 查看 Service
+   kubectl get svc -n {{ .Release.Namespace }} {{ include "kubefeel-nginx-starter.fullname" . }}
