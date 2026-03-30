@@ -398,6 +398,35 @@ export type K8sObject = {
   [key: string]: unknown
 }
 
+export type WorkloadPod = {
+  name: string
+  namespace: string
+  phase: string
+  nodeName: string
+  podIP: string
+  containers: string[]
+  readyContainers: number
+  totalContainers: number
+  restartCount: number
+  createdAt: string
+}
+
+export type PodLogsResult = {
+  pod: string
+  namespace: string
+  container: string
+  content: string
+}
+
+export type PodExecResult = {
+  pod: string
+  namespace: string
+  container: string
+  command: string
+  stdout: string
+  stderr: string
+}
+
 export type Session = {
   token: string
   user: User

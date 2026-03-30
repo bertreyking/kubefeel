@@ -28,6 +28,9 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			}
 		}
 		if token == "" {
+			token = strings.TrimSpace(c.Query("access_token"))
+		}
+		if token == "" {
 			respondError(c, http.StatusUnauthorized, "missing auth token")
 			return
 		}

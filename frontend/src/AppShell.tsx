@@ -34,6 +34,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tabs,
   Typography,
   Upload,
 } from 'antd'
@@ -50,6 +51,7 @@ import {
   CopyOutlined,
   DeleteOutlined,
   DeploymentUnitOutlined,
+  DownloadOutlined,
   EditOutlined,
   EyeOutlined,
   FolderOpenOutlined,
@@ -62,11 +64,15 @@ import {
   StarFilled,
   SyncOutlined,
   TeamOutlined,
+  UploadOutlined,
 } from '@ant-design/icons'
+import { FitAddon } from '@xterm/addon-fit'
 import dayjs from 'dayjs'
+import { Terminal } from 'xterm'
+import 'xterm/css/xterm.css'
 import YAML from 'yaml'
 
-import { HttpError, createApi, postPublic } from './api/client'
+import { HttpError, createApi, postPublic, resolveApiBaseUrls } from './api/client'
 import './AppShell.css'
 import type {
   AppTemplate,
@@ -96,6 +102,7 @@ import type {
   Role,
   Session,
   User,
+  WorkloadPod,
 } from './types'
 
 const sessionStorageKey = 'kubefeel-session'
@@ -262,6 +269,9 @@ type GrafanaDashboardSubmitMode = 'move' | 'clone'
 type ResourceDrawerMode = 'create' | 'edit' | 'clone' | 'inspect'
 
 type ResourceDrawerPanel = 'yaml' | 'diff' | 'audit'
+type WorkloadDetailTab = 'pods' | 'containers' | 'strategy' | 'metadata' | 'history'
+type PodLogStreamStatus = 'connecting' | 'live' | 'stopped' | 'error'
+type PodTerminalStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 
 type PermissionGroup = {
   key: string
@@ -327,6 +337,36 @@ type DeploymentInsight = {
     imagePullPolicy: string
   }>
   conditions: DeploymentConditionInsight[]
+}
+
+type ResourceContainerDetail = {
+  name: string
+  image: string
+  imagePullPolicy: string
+  ports: string
+  cpuRequest: string
+  cpuLimit: string
+  memoryRequest: string
+  memoryLimit: string
+}
+
+type PodTerminalMessage = {
+  type: string
+  stream?: string
+  data?: string
+  error?: string
+  cols?: number
+  rows?: number
+}
+
+type PodLogViewer = {
+  pod: WorkloadPod
+  container: string
+}
+
+type PodTerminalWorkspace = {
+  pod: WorkloadPod
+  container: string
 }
 
 type GrafanaFolderCreateResult = {
@@ -600,6 +640,26 @@ function Workspace() {
   const [resourceDetailOpen, setResourceDetailOpen] = useState(false)
   const [resourceDetailLoading, setResourceDetailLoading] = useState(false)
   const [resourceDetailResource, setResourceDetailResource] = useState<K8sObject | null>(null)
+  const [resourceDetailTab, setResourceDetailTab] = useState<WorkloadDetailTab>('pods')
+  const [resourceDetailPodSearch, setResourceDetailPodSearch] = useState('')
+  const [workloadPods, setWorkloadPods] = useState<WorkloadPod[]>([])
+  const [workloadPodsLoading, setWorkloadPodsLoading] = useState(false)
+  const [podLogsViewer, setPodLogsViewer] = useState<PodLogViewer | null>(null)
+  const [podLogsOpen, setPodLogsOpen] = useState(false)
+  const [podLogsStatus, setPodLogsStatus] = useState<PodLogStreamStatus>('stopped')
+  const [podLogsContent, setPodLogsContent] = useState('')
+  const [podLogsError, setPodLogsError] = useState('')
+  const [podLogsAutoScroll, setPodLogsAutoScroll] = useState(true)
+  const [podLogsRevision, setPodLogsRevision] = useState(0)
+  const [podTerminalWorkspace, setPodTerminalWorkspace] = useState<PodTerminalWorkspace | null>(null)
+  const [podTerminalOpen, setPodTerminalOpen] = useState(false)
+  const [podTerminalStatus, setPodTerminalStatus] = useState<PodTerminalStatus>('disconnected')
+  const [podTerminalError, setPodTerminalError] = useState('')
+  const [podTerminalRevision, setPodTerminalRevision] = useState(0)
+  const [podTerminalUploadDir, setPodTerminalUploadDir] = useState('/tmp')
+  const [podTerminalDownloadPath, setPodTerminalDownloadPath] = useState('')
+  const [podTerminalUploading, setPodTerminalUploading] = useState(false)
+  const [podTerminalDownloading, setPodTerminalDownloading] = useState(false)
   const [resourceReviewOpen, setResourceReviewOpen] = useState(false)
   const [resourceSubmitting, setResourceSubmitting] = useState(false)
   const [registryDrawerOpen, setRegistryDrawerOpen] = useState(false)
@@ -620,6 +680,14 @@ function Workspace() {
   const [grafanaFolderForm] = Form.useForm<GrafanaFolderFormValues>()
   const [grafanaDashboardForm] = Form.useForm<GrafanaDashboardFormValues>()
   const [grafanaBulkActionForm] = Form.useForm<GrafanaBulkActionFormValues>()
+
+  const podLogsAbortRef = useRef<AbortController | null>(null)
+  const podLogsOutputRef = useRef<HTMLDivElement | null>(null)
+  const podTerminalHostRef = useRef<HTMLDivElement | null>(null)
+  const podTerminalRef = useRef<Terminal | null>(null)
+  const podTerminalFitRef = useRef<FitAddon | null>(null)
+  const podTerminalSocketRef = useRef<WebSocket | null>(null)
+  const podTerminalUploadInputRef = useRef<HTMLInputElement | null>(null)
 
   const watchedKubeconfig = Form.useWatch('kubeconfig', clusterForm) ?? ''
   const watchedRoleIds = Form.useWatch('roleIds', userForm) ?? []
@@ -1026,6 +1094,26 @@ function Workspace() {
     () => buildDeploymentInsight(resourceDetailResource),
     [resourceDetailResource],
   )
+  const resourceDetailSupportsPodOps = useMemo(
+    () => supportsPodOperations(selectedResourceDefinition?.key),
+    [selectedResourceDefinition],
+  )
+  const resourceDetailContainerDetails = useMemo(
+    () => buildResourceContainerDetails(resourceDetailResource),
+    [resourceDetailResource],
+  )
+  const filteredWorkloadPods = useMemo(() => {
+    const query = resourceDetailPodSearch.trim().toLowerCase()
+    if (!query) {
+      return workloadPods
+    }
+
+    return workloadPods.filter((pod) =>
+      [pod.name, pod.nodeName, pod.podIP, ...pod.containers]
+        .filter(Boolean)
+        .some((value) => value.toLowerCase().includes(query)),
+    )
+  }, [resourceDetailPodSearch, workloadPods])
 
   const hydrateWorkspaceEvent = useEffectEvent(
     async (client: ReturnType<typeof createApi>, token: string) => {
@@ -1048,6 +1136,31 @@ function Workspace() {
       search: string,
     ) => {
       await refreshResources(client, clusterId, definition, namespace, search)
+    },
+  )
+
+  const refreshWorkloadPodsEvent = useEffectEvent(
+    async (
+      client: ReturnType<typeof createApi>,
+      clusterId: number,
+      resourceType: string,
+      workloadName: string,
+      namespace: string,
+    ) => {
+      setWorkloadPodsLoading(true)
+      try {
+        const items = await client.get<WorkloadPod[]>(
+          `/clusters/${clusterId}/workloads/${resourceType}/${workloadName}/pods?${new URLSearchParams({
+            namespace,
+          }).toString()}`,
+        )
+        setWorkloadPods(items)
+      } catch (error) {
+        setWorkloadPods([])
+        handleError(error, '加载 Pod 列表失败')
+      } finally {
+        setWorkloadPodsLoading(false)
+      }
     },
   )
 
@@ -1149,6 +1262,291 @@ function Workspace() {
     selectedNamespace,
     deferredSearch,
   ])
+
+  useEffect(() => {
+    if (
+      !api ||
+      !canReadResources ||
+      !selectedClusterId ||
+      !resourceDetailOpen ||
+      !resourceDetailResource ||
+      !selectedResourceDefinition ||
+      !resourceDetailSupportsPodOps
+    ) {
+      setWorkloadPods([])
+      setWorkloadPodsLoading(false)
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      setWorkloadPods([])
+      setWorkloadPodsLoading(false)
+      return
+    }
+
+    void refreshWorkloadPodsEvent(
+      api,
+      selectedClusterId,
+      selectedResourceDefinition.key,
+      resourceName(resourceDetailResource),
+      namespace,
+    )
+  }, [
+    api,
+    canReadResources,
+    resourceDetailOpen,
+    resourceDetailResource,
+    resourceDetailSupportsPodOps,
+    selectedClusterId,
+    selectedResourceDefinition,
+  ])
+
+  useEffect(() => {
+    if (!podLogsAutoScroll || !podLogsOutputRef.current) {
+      return
+    }
+
+    const element = podLogsOutputRef.current
+    element.scrollTop = element.scrollHeight
+  }, [podLogsAutoScroll, podLogsContent])
+
+  useEffect(() => {
+    if (!podLogsOpen || !podLogsViewer || !selectedClusterId) {
+      podLogsAbortRef.current?.abort()
+      podLogsAbortRef.current = null
+      setPodLogsStatus('stopped')
+      return
+    }
+
+    const controller = new AbortController()
+    podLogsAbortRef.current?.abort()
+    podLogsAbortRef.current = controller
+    setPodLogsStatus('connecting')
+    setPodLogsError('')
+    setPodLogsContent('')
+
+    const params = new URLSearchParams({
+      namespace: podLogsViewer.pod.namespace,
+      tailLines: '300',
+    })
+    if (podLogsViewer.container) {
+      params.set('container', podLogsViewer.container)
+    }
+
+    const headers = new Headers()
+    if (sessionToken) {
+      headers.set('Authorization', `Bearer ${sessionToken}`)
+    }
+
+    void (async () => {
+      try {
+        const response = await fetch(
+          `${resolveDirectApiBase()}/clusters/${selectedClusterId}/pods/${encodeURIComponent(
+            podLogsViewer.pod.name,
+          )}/logs/stream?${params.toString()}`,
+          {
+            method: 'GET',
+            headers,
+            credentials: 'include',
+            signal: controller.signal,
+          },
+        )
+
+        if (!response.ok || !response.body) {
+          throw new Error(await readResponseError(response, '加载 Pod 日志失败'))
+        }
+
+        setPodLogsStatus('live')
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) {
+            break
+          }
+          if (value) {
+            setPodLogsContent((current) => current + decoder.decode(value, { stream: true }))
+          }
+        }
+
+        setPodLogsStatus('stopped')
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        setPodLogsStatus('error')
+        setPodLogsError(error instanceof Error ? error.message : '日志流已中断')
+      }
+    })()
+
+    return () => {
+      controller.abort()
+      if (podLogsAbortRef.current === controller) {
+        podLogsAbortRef.current = null
+      }
+    }
+  }, [podLogsOpen, podLogsRevision, podLogsViewer, selectedClusterId, sessionToken])
+
+  useEffect(() => {
+    if (!podTerminalOpen || !podTerminalWorkspace || !selectedClusterId || !podTerminalHostRef.current) {
+      podTerminalSocketRef.current?.close()
+      podTerminalSocketRef.current = null
+      podTerminalFitRef.current = null
+      podTerminalRef.current?.dispose()
+      podTerminalRef.current = null
+      if (!podTerminalOpen) {
+        setPodTerminalStatus('disconnected')
+        setPodTerminalError('')
+      }
+      return
+    }
+
+    const host = podTerminalHostRef.current
+    host.innerHTML = ''
+
+    const terminal = new Terminal({
+      convertEol: true,
+      cursorBlink: true,
+      fontFamily: '"IBM Plex Mono", "SFMono-Regular", monospace',
+      fontSize: 14,
+      lineHeight: 1.4,
+      scrollback: 5000,
+      theme: {
+        background: '#08131d',
+        foreground: '#e7f3f8',
+        cursor: '#4ed0c2',
+        selectionBackground: 'rgba(78, 208, 194, 0.28)',
+        black: '#08131d',
+        red: '#ff7875',
+        green: '#73d13d',
+        yellow: '#ffc53d',
+        blue: '#5b8cff',
+        magenta: '#c792ea',
+        cyan: '#5eead4',
+        white: '#e7f3f8',
+        brightBlack: '#4a6170',
+        brightRed: '#ffa39e',
+        brightGreen: '#b7eb8f',
+        brightYellow: '#ffe58f',
+        brightBlue: '#adc6ff',
+        brightMagenta: '#efdbff',
+        brightCyan: '#87e8de',
+        brightWhite: '#ffffff',
+      },
+    })
+    const fitAddon = new FitAddon()
+    terminal.loadAddon(fitAddon)
+    terminal.open(host)
+    fitAddon.fit()
+    terminal.focus()
+    terminal.writeln('\x1b[1;36mKubeFeel Pod Terminal\x1b[0m')
+    terminal.writeln(`Pod: ${podTerminalWorkspace.pod.name}`)
+    terminal.writeln(`Container: ${podTerminalWorkspace.container || 'default'}`)
+    terminal.writeln('')
+
+    podTerminalRef.current = terminal
+    podTerminalFitRef.current = fitAddon
+    setPodTerminalStatus('connecting')
+    setPodTerminalError('')
+
+    const socket = new WebSocket(
+      buildPodTerminalSocketUrl(
+        selectedClusterId,
+        podTerminalWorkspace.pod.namespace,
+        podTerminalWorkspace.pod.name,
+        podTerminalWorkspace.container,
+        sessionToken,
+      ),
+    )
+    podTerminalSocketRef.current = socket
+
+    const syncSize = () => {
+      try {
+        fitAddon.fit()
+      } catch {
+        return
+      }
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            type: 'resize',
+            cols: terminal.cols,
+            rows: terminal.rows,
+          } satisfies PodTerminalMessage),
+        )
+      }
+    }
+
+    const terminalDataDisposable = terminal.onData((data) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'input', data } satisfies PodTerminalMessage))
+      }
+    })
+    const terminalResizeDisposable = terminal.onResize(({ cols, rows }) => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'resize', cols, rows } satisfies PodTerminalMessage))
+      }
+    })
+    const resizeObserver = new ResizeObserver(() => {
+      syncSize()
+    })
+    resizeObserver.observe(host)
+
+    socket.onopen = () => {
+      setPodTerminalStatus('connected')
+      syncSize()
+    }
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data) as PodTerminalMessage
+        if (message.type === 'output') {
+          terminal.write(message.data || '')
+          return
+        }
+        if (message.type === 'status') {
+          if (message.data === 'closed') {
+            setPodTerminalStatus('disconnected')
+            terminal.writeln('\r\n\x1b[90m[session closed]\x1b[0m')
+          }
+          return
+        }
+        if (message.type === 'error') {
+          setPodTerminalStatus('error')
+          setPodTerminalError(message.error || '终端连接失败')
+          terminal.writeln(`\r\n\x1b[31m[error] ${message.error || 'terminal failure'}\x1b[0m`)
+        }
+      } catch {
+        terminal.writeln('\r\n\x1b[33m[warn] 收到无法解析的终端消息\x1b[0m')
+      }
+    }
+    socket.onerror = () => {
+      setPodTerminalStatus('error')
+      setPodTerminalError('终端连接失败，请稍后重试')
+    }
+    socket.onclose = () => {
+      setPodTerminalStatus((current) => (current === 'error' ? current : 'disconnected'))
+    }
+
+    return () => {
+      resizeObserver.disconnect()
+      terminalDataDisposable.dispose()
+      terminalResizeDisposable.dispose()
+      socket.close()
+      terminal.dispose()
+      if (podTerminalSocketRef.current === socket) {
+        podTerminalSocketRef.current = null
+      }
+      if (podTerminalRef.current === terminal) {
+        podTerminalRef.current = null
+      }
+      if (podTerminalFitRef.current === fitAddon) {
+        podTerminalFitRef.current = null
+      }
+    }
+  }, [podTerminalOpen, podTerminalRevision, podTerminalWorkspace, selectedClusterId, sessionToken])
 
   useEffect(() => {
     if (!canReadClusters || !selectedClusterId || !api || activeView !== 'inspection') {
@@ -1458,6 +1856,9 @@ function Workspace() {
       setResourceDetailOpen(false)
       setResourceDetailLoading(false)
       setResourceDetailResource(null)
+      setWorkloadPods([])
+      setPodLogsOpen(false)
+      setPodTerminalOpen(false)
     }
   }, [resources, selectedResourceKey])
 
@@ -1466,6 +1867,28 @@ function Workspace() {
     setResourceDetailLoading(false)
     setResourceDetailResource(null)
     setSelectedResourceKey('')
+    setResourceDetailTab('pods')
+    setResourceDetailPodSearch('')
+    setWorkloadPods([])
+    setWorkloadPodsLoading(false)
+    podLogsAbortRef.current?.abort()
+    podLogsAbortRef.current = null
+    setPodLogsViewer(null)
+    setPodLogsOpen(false)
+    setPodLogsStatus('stopped')
+    setPodLogsContent('')
+    setPodLogsError('')
+    setPodLogsAutoScroll(true)
+    setPodLogsRevision(0)
+    setPodTerminalOpen(false)
+    setPodTerminalStatus('disconnected')
+    setPodTerminalError('')
+    setPodTerminalWorkspace(null)
+    setPodTerminalRevision(0)
+    setPodTerminalUploadDir('/tmp')
+    setPodTerminalDownloadPath('')
+    setPodTerminalUploading(false)
+    setPodTerminalDownloading(false)
   }, [selectedClusterId, selectedResourceType, selectedNamespace])
 
   function logout(notify = true) {
@@ -2736,6 +3159,8 @@ function Workspace() {
     setSelectedResourceKey(buildResourceSelectionKey(resource))
     setResourceDetailOpen(true)
     setResourceDetailLoading(true)
+    setResourceDetailTab('pods')
+    setResourceDetailPodSearch('')
 
     try {
       const query = buildNamespaceQuery(
@@ -2752,6 +3177,160 @@ function Workspace() {
       handleError(error, '加载资源详情失败')
     } finally {
       setResourceDetailLoading(false)
+    }
+  }
+
+  function refreshResourceDetailPods() {
+    if (
+      !api ||
+      !selectedClusterId ||
+      !selectedResourceDefinition ||
+      !resourceDetailResource ||
+      !resourceDetailSupportsPodOps
+    ) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    setWorkloadPodsLoading(true)
+    void api
+      .get<WorkloadPod[]>(
+        `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+          resourceDetailResource,
+        )}/pods?${new URLSearchParams({ namespace }).toString()}`,
+      )
+      .then((items) => {
+        setWorkloadPods(items)
+      })
+      .catch((error) => {
+        setWorkloadPods([])
+        handleError(error, '刷新 Pod 列表失败')
+      })
+      .finally(() => {
+        setWorkloadPodsLoading(false)
+      })
+  }
+
+  function openPodLogs(pod: WorkloadPod) {
+    setPodLogsViewer({
+      pod,
+      container: pod.containers[0] || '',
+    })
+    setPodLogsContent('')
+    setPodLogsError('')
+    setPodLogsStatus('connecting')
+    setPodLogsAutoScroll(true)
+    setPodLogsOpen(true)
+  }
+
+  function openPodTerminal(pod: WorkloadPod) {
+    setPodTerminalWorkspace({
+      pod,
+      container: pod.containers[0] || '',
+    })
+    setPodTerminalError('')
+    setPodTerminalStatus('connecting')
+    setPodTerminalUploadDir('/tmp')
+    setPodTerminalDownloadPath('')
+    setPodTerminalOpen(true)
+  }
+
+  async function uploadFileToPod(file: File) {
+    if (!selectedClusterId || !podTerminalWorkspace) {
+      return
+    }
+
+    try {
+      setPodTerminalUploading(true)
+      const formData = new FormData()
+      formData.set('file', file)
+      formData.set('container', podTerminalWorkspace.container)
+      formData.set('destinationDir', podTerminalUploadDir.trim() || '/tmp')
+
+      const headers = new Headers()
+      if (sessionToken) {
+        headers.set('Authorization', `Bearer ${sessionToken}`)
+      }
+
+      const response = await fetch(
+        `${resolveDirectApiBase()}/clusters/${selectedClusterId}/pods/${encodeURIComponent(
+          podTerminalWorkspace.pod.name,
+        )}/files/upload?${new URLSearchParams({
+          namespace: podTerminalWorkspace.pod.namespace,
+        }).toString()}`,
+        {
+          method: 'POST',
+          headers,
+          body: formData,
+          credentials: 'include',
+        },
+      )
+      if (!response.ok) {
+        throw new Error(await readResponseError(response, '上传文件失败'))
+      }
+
+      message.success(`文件已上传到 ${podTerminalUploadDir.trim() || '/tmp'}`)
+    } catch (error) {
+      handleError(error, '上传文件失败')
+    } finally {
+      setPodTerminalUploading(false)
+    }
+  }
+
+  async function downloadFileFromPod() {
+    if (!selectedClusterId || !podTerminalWorkspace) {
+      return
+    }
+
+    const remotePath = podTerminalDownloadPath.trim()
+    if (!remotePath) {
+      message.error('请输入容器中的文件路径')
+      return
+    }
+
+    try {
+      setPodTerminalDownloading(true)
+      const headers = new Headers()
+      if (sessionToken) {
+        headers.set('Authorization', `Bearer ${sessionToken}`)
+      }
+
+      const response = await fetch(
+        `${resolveDirectApiBase()}/clusters/${selectedClusterId}/pods/${encodeURIComponent(
+          podTerminalWorkspace.pod.name,
+        )}/files/download?${new URLSearchParams({
+          namespace: podTerminalWorkspace.pod.namespace,
+          container: podTerminalWorkspace.container,
+          path: remotePath,
+        }).toString()}`,
+        {
+          method: 'GET',
+          headers,
+          credentials: 'include',
+        },
+      )
+      if (!response.ok) {
+        throw new Error(await readResponseError(response, '下载文件失败'))
+      }
+
+      const blob = await response.blob()
+      const objectUrl = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = resolveDownloadFileName(response, remotePath)
+      document.body.append(link)
+      link.click()
+      link.remove()
+      window.URL.revokeObjectURL(objectUrl)
+      message.success('文件下载已开始')
+    } catch (error) {
+      handleError(error, '下载文件失败')
+    } finally {
+      setPodTerminalDownloading(false)
     }
   }
 
@@ -3293,6 +3872,36 @@ function Workspace() {
     setResourceDetailOpen(false)
     setResourceDetailLoading(false)
     setResourceDetailResource(null)
+    setResourceDetailTab('pods')
+    setResourceDetailPodSearch('')
+    setWorkloadPods([])
+    setWorkloadPodsLoading(false)
+    closePodLogsModal()
+    closePodTerminalModal()
+  }
+
+  function closePodLogsModal() {
+    podLogsAbortRef.current?.abort()
+    podLogsAbortRef.current = null
+    setPodLogsOpen(false)
+    setPodLogsStatus('stopped')
+    setPodLogsContent('')
+    setPodLogsError('')
+    setPodLogsViewer(null)
+  }
+
+  function closePodTerminalModal() {
+    podTerminalSocketRef.current?.close()
+    podTerminalSocketRef.current = null
+    podTerminalRef.current?.dispose()
+    podTerminalRef.current = null
+    podTerminalFitRef.current = null
+    setPodTerminalOpen(false)
+    setPodTerminalStatus('disconnected')
+    setPodTerminalError('')
+    setPodTerminalWorkspace(null)
+    setPodTerminalUploading(false)
+    setPodTerminalDownloading(false)
   }
 
   function handleError(error: unknown, fallback: string) {
@@ -3543,6 +4152,108 @@ function Workspace() {
       actionColumn,
     ]
   })()
+
+  const workloadPodColumns: TableColumnsType<WorkloadPod> = [
+    {
+      title: '容器组名称',
+      key: 'name',
+      render: (_, pod) => (
+        <div className="entity-stack">
+          <span className="entity-primary">{pod.name}</span>
+          <span className="entity-secondary">{pod.namespace}</span>
+        </div>
+      ),
+    },
+    {
+      title: '状态',
+      key: 'phase',
+      render: (_, pod) => (
+        <Space direction="vertical" size={4}>
+          <Tag color={podPhaseColor(pod.phase)}>{podPhaseLabel(pod.phase)}</Tag>
+          <Typography.Text type="secondary" className="table-note">
+            {`${pod.readyContainers}/${pod.totalContainers} Ready · Restart ${pod.restartCount}`}
+          </Typography.Text>
+        </Space>
+      ),
+    },
+    {
+      title: '容器(正常/总量)',
+      key: 'ready',
+      render: (_, pod) => `${pod.readyContainers}/${pod.totalContainers}`,
+    },
+    {
+      title: '容器组 IP',
+      key: 'podIP',
+      render: (_, pod) => pod.podIP || '-',
+    },
+    {
+      title: '节点',
+      key: 'nodeName',
+      render: (_, pod) => pod.nodeName || '-',
+    },
+    {
+      title: '重启次数',
+      key: 'restartCount',
+      render: (_, pod) => String(pod.restartCount),
+    },
+    {
+      title: '创建时间',
+      key: 'createdAt',
+      render: (_, pod) => formatDate(pod.createdAt),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      render: (_, pod) => (
+        <Space size="small">
+          <Button size="small" onClick={() => openPodLogs(pod)}>
+            Logs
+          </Button>
+          {canWriteResources ? (
+            <Button
+              size="small"
+              disabled={pod.phase !== 'Running'}
+              onClick={() => openPodTerminal(pod)}
+            >
+              Exec
+            </Button>
+          ) : null}
+        </Space>
+      ),
+    },
+  ]
+
+  const resourceContainerColumns: TableColumnsType<ResourceContainerDetail> = [
+    {
+      title: '容器',
+      dataIndex: 'name',
+    },
+    {
+      title: '镜像',
+      dataIndex: 'image',
+      render: (value) => value || '-',
+    },
+    {
+      title: '拉取策略',
+      dataIndex: 'imagePullPolicy',
+      render: (value) => value || '-',
+    },
+    {
+      title: '端口',
+      dataIndex: 'ports',
+      render: (value) => value || '-',
+    },
+    {
+      title: 'CPU 请求/限制',
+      key: 'cpu',
+      render: (_, item) => `${item.cpuRequest || '-'}/${item.cpuLimit || '-'}`,
+    },
+    {
+      title: '内存请求/限制',
+      key: 'memory',
+      render: (_, item) => `${item.memoryRequest || '-'}/${item.memoryLimit || '-'}`,
+    },
+  ]
 
   const userColumns: TableColumnsType<User> = [
     {
@@ -7009,239 +7720,734 @@ function Workspace() {
       </Modal>
 
       <Drawer
-        title={resourceDetailResource ? `资源详情 · ${resourceName(resourceDetailResource)}` : '资源详情'}
-        width={640}
+        title={
+          resourceDetailSupportsPodOps
+            ? null
+            : resourceDetailResource
+              ? `资源详情 · ${resourceName(resourceDetailResource)}`
+              : '资源详情'
+        }
+        width={resourceDetailSupportsPodOps ? 1240 : 640}
         open={resourceDetailOpen}
         onClose={closeResourceDetailDrawer}
       >
         {resourceDetailLoading ? (
           <Spin />
         ) : resourceDetailResource ? (
-          <div className="resource-detail-shell inspector-stack">
-            <div className="resource-detail-hero">
-              <div className="identity-block">
-                <strong>{resourceName(resourceDetailResource)}</strong>
-                <span>{resourceDetailResource.kind}</span>
-              </div>
-              <div className="resource-detail-actions">
-                <Button icon={<EyeOutlined />} onClick={() => openResourceEditorFromDetail('yaml')}>
-                  YAML
-                </Button>
-                <Button onClick={() => openResourceEditorFromDetail('diff')}>Diff</Button>
-                <Button onClick={() => openResourceEditorFromDetail('audit')}>审计</Button>
-                {canWriteResources ? (
-                  <Button icon={<CopyOutlined />} onClick={openResourceCloneFromDetail}>
-                    克隆
+          resourceDetailSupportsPodOps ? (
+            <div className="workload-detail-shell">
+              <div className="workload-detail-toolbar">
+                <div className="workload-detail-breadcrumb">
+                  <span>
+                    <strong>集群:</strong> {selectedCluster?.name || '-'}
+                  </span>
+                  <span>/</span>
+                  <span>
+                    <strong>命名空间:</strong> {resourceNamespace(resourceDetailResource) || 'Cluster Scope'}
+                  </span>
+                  <span>/</span>
+                  <span>{selectedResourceDefinition?.label || resourceDetailResource.kind}</span>
+                  <span>/</span>
+                  <strong>{resourceName(resourceDetailResource)}</strong>
+                </div>
+                <div className="resource-detail-actions">
+                  <Button icon={<EyeOutlined />} onClick={() => openResourceEditorFromDetail('yaml')}>
+                    YAML
                   </Button>
-                ) : null}
-                {canWriteResources ? (
-                  <Button danger icon={<DeleteOutlined />} onClick={() => void removeResourceFromDetail()}>
-                    删除
-                  </Button>
-                ) : null}
+                  <Button onClick={() => openResourceEditorFromDetail('diff')}>Diff</Button>
+                  <Button onClick={() => openResourceEditorFromDetail('audit')}>审计</Button>
+                  {canWriteResources ? (
+                    <Button icon={<CopyOutlined />} onClick={openResourceCloneFromDetail}>
+                      克隆
+                    </Button>
+                  ) : null}
+                  {canWriteResources ? (
+                    <Button danger icon={<DeleteOutlined />} onClick={() => void removeResourceFromDetail()}>
+                      删除
+                    </Button>
+                  ) : null}
+                </div>
               </div>
-            </div>
 
-            {resourceDetailDeploymentInsight ? (
-              <>
-                <div className={`deployment-health-card deployment-health-card-${resourceDetailDeploymentInsight.rolloutTone}`}>
-                  <div className="deployment-health-copy">
-                    <span className="context-chip-label">Rollout</span>
-                    <strong>{resourceDetailDeploymentInsight.rolloutLabel}</strong>
-                    <span>{resourceDetailDeploymentInsight.rolloutSummary}</span>
+              <section className="workload-detail-section">
+                <div className="workload-section-head">
+                  <strong>基本信息</strong>
+                </div>
+                <div className="workload-overview-panel">
+                  <div className="workload-overview-title">
+                    <div className="identity-block">
+                      <strong>{resourceName(resourceDetailResource)}</strong>
+                      <span>{resourceDetailResource.kind}</span>
+                    </div>
+                    <Tag>{selectedResourceDefinition?.label || resourceDetailResource.kind}</Tag>
                   </div>
-                  <div className="deployment-health-progress">
-                    <Progress
-                      percent={resourceDetailDeploymentInsight.rolloutPercent}
-                      status={deploymentProgressStatus(resourceDetailDeploymentInsight.rolloutTone)}
-                      showInfo={false}
-                    />
-                    <div className="deployment-health-meta">
-                      <Tag color={deploymentToneTagColor(resourceDetailDeploymentInsight.rolloutTone)}>
-                        {`${resourceDetailDeploymentInsight.ready}/${resourceDetailDeploymentInsight.desired} Ready`}
-                      </Tag>
-                      <span>{resourceDetailDeploymentInsight.strategyType}</span>
+                  <div className="workload-overview-grid">
+                    <div className="workload-overview-cell">
+                      <strong>{resourceName(resourceDetailResource)}</strong>
+                      <span>工作负载名称</span>
+                    </div>
+                    <div className="workload-overview-cell">
+                      <strong>{resourceNamespace(resourceDetailResource) || 'Cluster Scope'}</strong>
+                      <span>命名空间</span>
+                    </div>
+                    <div className="workload-overview-cell">
+                      <strong className={`status-text-${resolveWorkloadStatus(resourceDetailResource, resourceDetailDeploymentInsight, workloadPods).tone}`}>
+                        {resolveWorkloadStatus(resourceDetailResource, resourceDetailDeploymentInsight, workloadPods).label}
+                      </strong>
+                      <span>状态</span>
+                    </div>
+                    <div className="workload-overview-cell">
+                      <strong>{resolveWorkloadPolicy(resourceDetailResource, resourceDetailDeploymentInsight)}</strong>
+                      <span>升级策略</span>
+                    </div>
+                    <div className="workload-overview-cell">
+                      <strong>{formatDate(resourceDetailResource.metadata?.creationTimestamp)}</strong>
+                      <span>创建时间</span>
+                    </div>
+                    <div className="workload-overview-cell">
+                      <strong>{resolveWorkloadReplicaSummary(resourceDetailResource, resourceDetailDeploymentInsight, workloadPods)}</strong>
+                      <span>正常/全部实例数</span>
                     </div>
                   </div>
                 </div>
+              </section>
 
-                <div className="audit-mini-grid">
-                  <div className="audit-mini-card">
-                    <span>Desired</span>
-                    <strong>{resourceDetailDeploymentInsight.desired}</strong>
-                  </div>
-                  <div className="audit-mini-card">
-                    <span>Updated</span>
-                    <strong>{resourceDetailDeploymentInsight.updated}</strong>
-                  </div>
-                  <div className="audit-mini-card">
-                    <span>Available</span>
-                    <strong>{resourceDetailDeploymentInsight.available}</strong>
-                  </div>
-                </div>
+              <Tabs
+                className="workload-detail-tabs"
+                activeKey={resourceDetailTab}
+                onChange={(value) => setResourceDetailTab(value as WorkloadDetailTab)}
+                items={[
+                  {
+                    key: 'pods',
+                    label: '容器组',
+                    children: (
+                      <div className="workload-tab-shell">
+                        <div className="workload-tab-toolbar">
+                          <Input.Search
+                            allowClear
+                            placeholder="输入容器组名称、节点或 IP 搜索"
+                            value={resourceDetailPodSearch}
+                            onChange={(event) => setResourceDetailPodSearch(event.target.value)}
+                            className="workload-search"
+                          />
+                          <Button icon={<ReloadOutlined />} onClick={refreshResourceDetailPods}>
+                            刷新列表
+                          </Button>
+                        </div>
 
-                <div className="audit-mini-grid">
-                  <div className="audit-mini-card">
-                    <span>Ready</span>
-                    <strong>{resourceDetailDeploymentInsight.ready}</strong>
-                  </div>
-                  <div className="audit-mini-card">
-                    <span>Unavailable</span>
-                    <strong>{resourceDetailDeploymentInsight.unavailable}</strong>
-                  </div>
-                  <div className="audit-mini-card">
-                    <span>Revision</span>
-                    <strong>{resourceDetailDeploymentInsight.revision || '-'}</strong>
-                  </div>
-                </div>
-              </>
-            ) : null}
-
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="命名空间">
-                {resourceNamespace(resourceDetailResource) || 'Cluster Scope'}
-              </Descriptions.Item>
-              <Descriptions.Item label="创建时间">
-                {formatDate(resourceDetailResource.metadata?.creationTimestamp)}
-              </Descriptions.Item>
-              <Descriptions.Item label="资源版本">
-                {resourceDetailResource.metadata?.resourceVersion || '-'}
-              </Descriptions.Item>
-              <Descriptions.Item label="Generation">
-                {resourceDetailResource.metadata?.generation ?? '-'}
-              </Descriptions.Item>
-            </Descriptions>
-
-            <div className="audit-mini-grid">
-              <div className="audit-mini-card">
-                <span>Labels</span>
-                <strong>{Object.keys(resourceDetailResource.metadata?.labels ?? {}).length}</strong>
-              </div>
-              <div className="audit-mini-card">
-                <span>Annotations</span>
-                <strong>{Object.keys(resourceDetailResource.metadata?.annotations ?? {}).length}</strong>
-              </div>
-              <div className="audit-mini-card">
-                <span>Managed Fields</span>
-                <strong>{resourceDetailResource.metadata?.managedFields?.length ?? 0}</strong>
-              </div>
-            </div>
-
-            {resourceDetailDeploymentInsight ? (
-              <>
-                <section className="inspector-subsection">
-                  <div className="inspector-subtitle-row">
-                    <strong>容器镜像</strong>
-                    <span>{resourceDetailDeploymentInsight.containers.length} containers</span>
-                  </div>
-                  <div className="deployment-chip-grid">
-                    {resourceDetailDeploymentInsight.containers.map((container) => (
-                      <article
-                        key={`${container.name}-${container.image}`}
-                        className="deployment-chip-card"
-                      >
-                        <strong>{container.name}</strong>
-                        <span>{container.image || '-'}</span>
-                        <em>{container.imagePullPolicy || 'imagePullPolicy 未显式设置'}</em>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-
-                <section className="inspector-subsection">
-                  <div className="inspector-subtitle-row">
-                    <strong>发布策略</strong>
-                    <span>{resourceDetailDeploymentInsight.strategyType}</span>
-                  </div>
-                  <div className="tag-cloud">
-                    <Tag>{`maxSurge: ${resourceDetailDeploymentInsight.maxSurge}`}</Tag>
-                    <Tag>{`maxUnavailable: ${resourceDetailDeploymentInsight.maxUnavailable}`}</Tag>
-                  </div>
-                </section>
-
-                <section className="inspector-subsection">
-                  <div className="inspector-subtitle-row">
-                    <strong>Selector</strong>
-                    <span>{Object.keys(resourceDetailDeploymentInsight.selectorLabels).length} labels</span>
-                  </div>
-                  <div className="tag-cloud">
-                    {Object.entries(resourceDetailDeploymentInsight.selectorLabels).length > 0 ? (
-                      Object.entries(resourceDetailDeploymentInsight.selectorLabels).map(([key, value]) => (
-                        <Tag key={`${key}-${value}`}>{`${key}: ${value}`}</Tag>
-                      ))
-                    ) : (
-                      <Typography.Text type="secondary">当前 Deployment 未显式设置 selector labels</Typography.Text>
-                    )}
-                  </div>
-                </section>
-
-                <section className="inspector-subsection">
-                  <div className="inspector-subtitle-row">
-                    <strong>Pod Labels</strong>
-                    <span>{Object.keys(resourceDetailDeploymentInsight.templateLabels).length} labels</span>
-                  </div>
-                  <div className="tag-cloud">
-                    {Object.entries(resourceDetailDeploymentInsight.templateLabels).length > 0 ? (
-                      Object.entries(resourceDetailDeploymentInsight.templateLabels).map(([key, value]) => (
-                        <Tag key={`${key}-${value}`}>{`${key}: ${value}`}</Tag>
-                      ))
-                    ) : (
-                      <Typography.Text type="secondary">当前 Pod Template 没有 labels</Typography.Text>
-                    )}
-                  </div>
-                </section>
-
-                <section className="inspector-subsection">
-                  <div className="inspector-subtitle-row">
-                    <strong>Conditions</strong>
-                    <span>{resourceDetailDeploymentInsight.conditions.length}</span>
-                  </div>
-                  <div className="deployment-condition-list">
-                    {resourceDetailDeploymentInsight.conditions.length > 0 ? (
-                      resourceDetailDeploymentInsight.conditions.map((condition) => (
-                        <article
-                          key={`${condition.type}-${condition.reason}-${condition.lastUpdateTime || 'na'}`}
-                          className="deployment-condition-card"
-                        >
-                          <div className="deployment-condition-head">
-                            <strong>{condition.type}</strong>
-                            <Tag color={deploymentConditionTagColor(condition.status)}>
-                              {condition.status || 'Unknown'}
-                            </Tag>
+                        {workloadPodsLoading ? (
+                          <div className="resource-detail-placeholder">
+                            <Spin size="small" />
+                            <Typography.Text type="secondary">正在加载 Pod 列表</Typography.Text>
                           </div>
-                          <span>{condition.reason || '未提供 reason'}</span>
-                          <p>{condition.message || '当前 condition 未提供详细信息。'}</p>
-                          <em>{formatDate(condition.lastUpdateTime)}</em>
-                        </article>
-                      ))
+                        ) : filteredWorkloadPods.length > 0 ? (
+                          <Table<WorkloadPod>
+                            rowKey={(pod) => `${pod.namespace}:${pod.name}`}
+                            columns={workloadPodColumns}
+                            dataSource={filteredWorkloadPods}
+                            pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                            size="small"
+                            className="pod-ops-table"
+                          />
+                        ) : (
+                          <Empty
+                            image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            description="当前工作负载下暂未发现符合条件的 Pod"
+                          />
+                        )}
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'containers',
+                    label: '容器配置',
+                    children: resourceDetailContainerDetails.length > 0 ? (
+                      <Table<ResourceContainerDetail>
+                        rowKey={(item) => item.name}
+                        columns={resourceContainerColumns}
+                        dataSource={resourceDetailContainerDetails}
+                        pagination={false}
+                        size="small"
+                      />
                     ) : (
-                      <Typography.Text type="secondary">当前 Deployment 没有 condition 信息</Typography.Text>
-                    )}
-                  </div>
-                </section>
-              </>
-            ) : null}
+                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载没有容器配置" />
+                    ),
+                  },
+                  {
+                    key: 'strategy',
+                    label: '调度策略',
+                    children: (
+                      <div className="workload-info-grid">
+                        <section className="workload-info-panel">
+                          <div className="inspector-subtitle-row">
+                            <strong>策略摘要</strong>
+                            <span>{resolveWorkloadPolicy(resourceDetailResource, resourceDetailDeploymentInsight)}</span>
+                          </div>
+                          <div className="tag-cloud">
+                            {resourceDetailDeploymentInsight ? (
+                              <>
+                                <Tag>{`maxSurge: ${resourceDetailDeploymentInsight.maxSurge}`}</Tag>
+                                <Tag>{`maxUnavailable: ${resourceDetailDeploymentInsight.maxUnavailable}`}</Tag>
+                              </>
+                            ) : null}
+                            <Tag>{`ServiceAccount: ${valueAsString(readNestedValue(getPodSpec(resourceDetailResource), ['serviceAccountName'])) || 'default'}`}</Tag>
+                            <Tag>{`Tolerations: ${Array.isArray(asRecord(getPodSpec(resourceDetailResource))?.tolerations) ? (asRecord(getPodSpec(resourceDetailResource))?.tolerations as Array<unknown>).length : 0}`}</Tag>
+                          </div>
+                        </section>
+                        <section className="workload-info-panel">
+                          <div className="inspector-subtitle-row">
+                            <strong>Selector</strong>
+                            <span>{Object.keys(readStringMap(resourceDetailResource, ['spec', 'selector', 'matchLabels'])).length} labels</span>
+                          </div>
+                          <div className="tag-cloud">
+                            {Object.entries(readStringMap(resourceDetailResource, ['spec', 'selector', 'matchLabels'])).length > 0 ? (
+                              Object.entries(readStringMap(resourceDetailResource, ['spec', 'selector', 'matchLabels'])).map(([key, value]) => (
+                                <Tag key={`${key}-${value}`}>{`${key}: ${value}`}</Tag>
+                              ))
+                            ) : (
+                              <Typography.Text type="secondary">当前工作负载未显式设置 selector labels</Typography.Text>
+                            )}
+                          </div>
+                        </section>
+                        <section className="workload-info-panel">
+                          <div className="inspector-subtitle-row">
+                            <strong>Pod Labels</strong>
+                            <span>{Object.keys(readStringMap(resourceDetailResource, ['spec', 'template', 'metadata', 'labels'])).length} labels</span>
+                          </div>
+                          <div className="tag-cloud">
+                            {Object.entries(readStringMap(resourceDetailResource, ['spec', 'template', 'metadata', 'labels'])).length > 0 ? (
+                              Object.entries(readStringMap(resourceDetailResource, ['spec', 'template', 'metadata', 'labels'])).map(([key, value]) => (
+                                <Tag key={`${key}-${value}`}>{`${key}: ${value}`}</Tag>
+                              ))
+                            ) : (
+                              <Typography.Text type="secondary">当前 Pod Template 没有 labels</Typography.Text>
+                            )}
+                          </div>
+                        </section>
+                        <section className="workload-info-panel">
+                          <div className="inspector-subtitle-row">
+                            <strong>Node Selector</strong>
+                            <span>{Object.keys(readStringMap(getPodSpec(resourceDetailResource) as K8sObject, ['nodeSelector'])).length} labels</span>
+                          </div>
+                          <div className="tag-cloud">
+                            {Object.entries(readStringMap(getPodSpec(resourceDetailResource) as K8sObject, ['nodeSelector'])).length > 0 ? (
+                              Object.entries(readStringMap(getPodSpec(resourceDetailResource) as K8sObject, ['nodeSelector'])).map(([key, value]) => (
+                                <Tag key={`${key}-${value}`}>{`${key}: ${value}`}</Tag>
+                              ))
+                            ) : (
+                              <Typography.Text type="secondary">当前工作负载未设置 nodeSelector</Typography.Text>
+                            )}
+                          </div>
+                        </section>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'metadata',
+                    label: '标签与注解',
+                    children: (
+                      <div className="workload-info-grid">
+                        <section className="workload-info-panel">
+                          <div className="inspector-subtitle-row">
+                            <strong>对象 Labels</strong>
+                            <span>{Object.keys(resourceDetailResource.metadata?.labels ?? {}).length}</span>
+                          </div>
+                          <div className="tag-cloud">
+                            {Object.entries(resourceDetailResource.metadata?.labels ?? {}).length > 0 ? (
+                              Object.entries(resourceDetailResource.metadata?.labels ?? {}).map(([key, value]) => (
+                                <Tag key={`label-${key}`}>{`${key}: ${value}`}</Tag>
+                              ))
+                            ) : (
+                              <Typography.Text type="secondary">当前资源没有 labels</Typography.Text>
+                            )}
+                          </div>
+                        </section>
+                        <section className="workload-info-panel">
+                          <div className="inspector-subtitle-row">
+                            <strong>对象 Annotations</strong>
+                            <span>{Object.keys(resourceDetailResource.metadata?.annotations ?? {}).length}</span>
+                          </div>
+                          <div className="tag-cloud">
+                            {Object.entries(resourceDetailResource.metadata?.annotations ?? {}).length > 0 ? (
+                              Object.entries(resourceDetailResource.metadata?.annotations ?? {}).map(([key, value]) => (
+                                <Tag key={`annotation-${key}`}>{`${key}: ${value}`}</Tag>
+                              ))
+                            ) : (
+                              <Typography.Text type="secondary">当前资源没有 annotations</Typography.Text>
+                            )}
+                          </div>
+                        </section>
+                      </div>
+                    ),
+                  },
+                  {
+                    key: 'history',
+                    label: '版本记录',
+                    children: (
+                      <div className="workload-history-shell">
+                        <div className="audit-mini-grid">
+                          <div className="audit-mini-card">
+                            <span>资源版本</span>
+                            <strong>{resourceDetailResource.metadata?.resourceVersion || '-'}</strong>
+                          </div>
+                          <div className="audit-mini-card">
+                            <span>Generation</span>
+                            <strong>{resourceDetailResource.metadata?.generation ?? '-'}</strong>
+                          </div>
+                          <div className="audit-mini-card">
+                            <span>Revision</span>
+                            <strong>{resourceDetailDeploymentInsight?.revision || '-'}</strong>
+                          </div>
+                        </div>
+                        <div className="audit-mini-grid">
+                          <div className="audit-mini-card">
+                            <span>Managed Fields</span>
+                            <strong>{resourceDetailResource.metadata?.managedFields?.length ?? 0}</strong>
+                          </div>
+                          <div className="audit-mini-card">
+                            <span>UID</span>
+                            <strong>{resourceDetailResource.metadata?.uid || '-'}</strong>
+                          </div>
+                          <div className="audit-mini-card">
+                            <span>创建时间</span>
+                            <strong>{formatDate(resourceDetailResource.metadata?.creationTimestamp)}</strong>
+                          </div>
+                        </div>
 
-            <section className="inspector-subsection">
-              <div className="inspector-subtitle-row">
-                <strong>对象 Labels</strong>
-                <span>{Object.keys(resourceDetailResource.metadata?.labels ?? {}).length}</span>
+                        {resourceDetailDeploymentInsight ? (
+                          <section className="inspector-subsection">
+                            <div className="inspector-subtitle-row">
+                              <strong>Conditions</strong>
+                              <span>{resourceDetailDeploymentInsight.conditions.length}</span>
+                            </div>
+                            <div className="deployment-condition-list">
+                              {resourceDetailDeploymentInsight.conditions.length > 0 ? (
+                                resourceDetailDeploymentInsight.conditions.map((condition) => (
+                                  <article
+                                    key={`${condition.type}-${condition.reason}-${condition.lastUpdateTime || 'na'}`}
+                                    className="deployment-condition-card"
+                                  >
+                                    <div className="deployment-condition-head">
+                                      <strong>{condition.type}</strong>
+                                      <Tag color={deploymentConditionTagColor(condition.status)}>
+                                        {condition.status || 'Unknown'}
+                                      </Tag>
+                                    </div>
+                                    <span>{condition.reason || '未提供 reason'}</span>
+                                    <p>{condition.message || '当前 condition 未提供详细信息。'}</p>
+                                    <em>{formatDate(condition.lastUpdateTime)}</em>
+                                  </article>
+                                ))
+                              ) : (
+                                <Typography.Text type="secondary">当前工作负载没有 condition 信息</Typography.Text>
+                              )}
+                            </div>
+                          </section>
+                        ) : null}
+                      </div>
+                    ),
+                  },
+                ]}
+              />
+            </div>
+          ) : (
+            <div className="resource-detail-shell inspector-stack">
+              <div className="resource-detail-hero">
+                <div className="identity-block">
+                  <strong>{resourceName(resourceDetailResource)}</strong>
+                  <span>{resourceDetailResource.kind}</span>
+                </div>
+                <div className="resource-detail-actions">
+                  <Button icon={<EyeOutlined />} onClick={() => openResourceEditorFromDetail('yaml')}>
+                    YAML
+                  </Button>
+                  <Button onClick={() => openResourceEditorFromDetail('diff')}>Diff</Button>
+                  <Button onClick={() => openResourceEditorFromDetail('audit')}>审计</Button>
+                  {canWriteResources ? (
+                    <Button icon={<CopyOutlined />} onClick={openResourceCloneFromDetail}>
+                      克隆
+                    </Button>
+                  ) : null}
+                  {canWriteResources ? (
+                    <Button danger icon={<DeleteOutlined />} onClick={() => void removeResourceFromDetail()}>
+                      删除
+                    </Button>
+                  ) : null}
+                </div>
               </div>
-              <div className="tag-cloud">
-                {Object.entries(resourceDetailResource.metadata?.labels ?? {}).length > 0 ? (
-                  Object.entries(resourceDetailResource.metadata?.labels ?? {}).map(([key, value]) => (
-                    <Tag key={key}>{`${key}: ${value}`}</Tag>
-                  ))
-                ) : (
-                  <Typography.Text type="secondary">当前资源没有 labels</Typography.Text>
-                )}
+
+              {resourceDetailDeploymentInsight ? (
+                <>
+                  <div className={`deployment-health-card deployment-health-card-${resourceDetailDeploymentInsight.rolloutTone}`}>
+                    <div className="deployment-health-copy">
+                      <span className="context-chip-label">Rollout</span>
+                      <strong>{resourceDetailDeploymentInsight.rolloutLabel}</strong>
+                      <span>{resourceDetailDeploymentInsight.rolloutSummary}</span>
+                    </div>
+                    <div className="deployment-health-progress">
+                      <Progress
+                        percent={resourceDetailDeploymentInsight.rolloutPercent}
+                        status={deploymentProgressStatus(resourceDetailDeploymentInsight.rolloutTone)}
+                        showInfo={false}
+                      />
+                      <div className="deployment-health-meta">
+                        <Tag color={deploymentToneTagColor(resourceDetailDeploymentInsight.rolloutTone)}>
+                          {`${resourceDetailDeploymentInsight.ready}/${resourceDetailDeploymentInsight.desired} Ready`}
+                        </Tag>
+                        <span>{resourceDetailDeploymentInsight.strategyType}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="audit-mini-grid">
+                    <div className="audit-mini-card">
+                      <span>Desired</span>
+                      <strong>{resourceDetailDeploymentInsight.desired}</strong>
+                    </div>
+                    <div className="audit-mini-card">
+                      <span>Updated</span>
+                      <strong>{resourceDetailDeploymentInsight.updated}</strong>
+                    </div>
+                    <div className="audit-mini-card">
+                      <span>Available</span>
+                      <strong>{resourceDetailDeploymentInsight.available}</strong>
+                    </div>
+                  </div>
+
+                  <div className="audit-mini-grid">
+                    <div className="audit-mini-card">
+                      <span>Ready</span>
+                      <strong>{resourceDetailDeploymentInsight.ready}</strong>
+                    </div>
+                    <div className="audit-mini-card">
+                      <span>Unavailable</span>
+                      <strong>{resourceDetailDeploymentInsight.unavailable}</strong>
+                    </div>
+                    <div className="audit-mini-card">
+                      <span>Revision</span>
+                      <strong>{resourceDetailDeploymentInsight.revision || '-'}</strong>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="命名空间">
+                  {resourceNamespace(resourceDetailResource) || 'Cluster Scope'}
+                </Descriptions.Item>
+                <Descriptions.Item label="创建时间">
+                  {formatDate(resourceDetailResource.metadata?.creationTimestamp)}
+                </Descriptions.Item>
+                <Descriptions.Item label="资源版本">
+                  {resourceDetailResource.metadata?.resourceVersion || '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="Generation">
+                  {resourceDetailResource.metadata?.generation ?? '-'}
+                </Descriptions.Item>
+              </Descriptions>
+
+              <div className="audit-mini-grid">
+                <div className="audit-mini-card">
+                  <span>Labels</span>
+                  <strong>{Object.keys(resourceDetailResource.metadata?.labels ?? {}).length}</strong>
+                </div>
+                <div className="audit-mini-card">
+                  <span>Annotations</span>
+                  <strong>{Object.keys(resourceDetailResource.metadata?.annotations ?? {}).length}</strong>
+                </div>
+                <div className="audit-mini-card">
+                  <span>Managed Fields</span>
+                  <strong>{resourceDetailResource.metadata?.managedFields?.length ?? 0}</strong>
+                </div>
               </div>
-            </section>
-          </div>
+
+              {resourceDetailDeploymentInsight ? (
+                <>
+                  <section className="inspector-subsection">
+                    <div className="inspector-subtitle-row">
+                      <strong>容器镜像</strong>
+                      <span>{resourceDetailDeploymentInsight.containers.length} containers</span>
+                    </div>
+                    <div className="deployment-chip-grid">
+                      {resourceDetailDeploymentInsight.containers.map((container) => (
+                        <article
+                          key={`${container.name}-${container.image}`}
+                          className="deployment-chip-card"
+                        >
+                          <strong>{container.name}</strong>
+                          <span>{container.image || '-'}</span>
+                          <em>{container.imagePullPolicy || 'imagePullPolicy 未显式设置'}</em>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section className="inspector-subsection">
+                    <div className="inspector-subtitle-row">
+                      <strong>发布策略</strong>
+                      <span>{resourceDetailDeploymentInsight.strategyType}</span>
+                    </div>
+                    <div className="tag-cloud">
+                      <Tag>{`maxSurge: ${resourceDetailDeploymentInsight.maxSurge}`}</Tag>
+                      <Tag>{`maxUnavailable: ${resourceDetailDeploymentInsight.maxUnavailable}`}</Tag>
+                    </div>
+                  </section>
+
+                  <section className="inspector-subsection">
+                    <div className="inspector-subtitle-row">
+                      <strong>Selector</strong>
+                      <span>{Object.keys(resourceDetailDeploymentInsight.selectorLabels).length} labels</span>
+                    </div>
+                    <div className="tag-cloud">
+                      {Object.entries(resourceDetailDeploymentInsight.selectorLabels).length > 0 ? (
+                        Object.entries(resourceDetailDeploymentInsight.selectorLabels).map(([key, value]) => (
+                          <Tag key={`${key}-${value}`}>{`${key}: ${value}`}</Tag>
+                        ))
+                      ) : (
+                        <Typography.Text type="secondary">当前 Deployment 未显式设置 selector labels</Typography.Text>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="inspector-subsection">
+                    <div className="inspector-subtitle-row">
+                      <strong>Pod Labels</strong>
+                      <span>{Object.keys(resourceDetailDeploymentInsight.templateLabels).length} labels</span>
+                    </div>
+                    <div className="tag-cloud">
+                      {Object.entries(resourceDetailDeploymentInsight.templateLabels).length > 0 ? (
+                        Object.entries(resourceDetailDeploymentInsight.templateLabels).map(([key, value]) => (
+                          <Tag key={`${key}-${value}`}>{`${key}: ${value}`}</Tag>
+                        ))
+                      ) : (
+                        <Typography.Text type="secondary">当前 Pod Template 没有 labels</Typography.Text>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="inspector-subsection">
+                    <div className="inspector-subtitle-row">
+                      <strong>Conditions</strong>
+                      <span>{resourceDetailDeploymentInsight.conditions.length}</span>
+                    </div>
+                    <div className="deployment-condition-list">
+                      {resourceDetailDeploymentInsight.conditions.length > 0 ? (
+                        resourceDetailDeploymentInsight.conditions.map((condition) => (
+                          <article
+                            key={`${condition.type}-${condition.reason}-${condition.lastUpdateTime || 'na'}`}
+                            className="deployment-condition-card"
+                          >
+                            <div className="deployment-condition-head">
+                              <strong>{condition.type}</strong>
+                              <Tag color={deploymentConditionTagColor(condition.status)}>
+                                {condition.status || 'Unknown'}
+                              </Tag>
+                            </div>
+                            <span>{condition.reason || '未提供 reason'}</span>
+                            <p>{condition.message || '当前 condition 未提供详细信息。'}</p>
+                            <em>{formatDate(condition.lastUpdateTime)}</em>
+                          </article>
+                        ))
+                      ) : (
+                        <Typography.Text type="secondary">当前 Deployment 没有 condition 信息</Typography.Text>
+                      )}
+                    </div>
+                  </section>
+                </>
+              ) : null}
+
+              <section className="inspector-subsection">
+                <div className="inspector-subtitle-row">
+                  <strong>对象 Labels</strong>
+                  <span>{Object.keys(resourceDetailResource.metadata?.labels ?? {}).length}</span>
+                </div>
+                <div className="tag-cloud">
+                  {Object.entries(resourceDetailResource.metadata?.labels ?? {}).length > 0 ? (
+                    Object.entries(resourceDetailResource.metadata?.labels ?? {}).map(([key, value]) => (
+                      <Tag key={key}>{`${key}: ${value}`}</Tag>
+                    ))
+                  ) : (
+                    <Typography.Text type="secondary">当前资源没有 labels</Typography.Text>
+                  )}
+                </div>
+              </section>
+            </div>
+          )
         ) : (
           <Empty description="没有可展示的资源详情" />
         )}
       </Drawer>
+
+      <Modal
+        title={podLogsViewer ? `实时日志 · ${podLogsViewer.pod.name}` : '实时日志'}
+        open={podLogsOpen}
+        onCancel={closePodLogsModal}
+        footer={
+          <Space>
+            <Button onClick={() => setPodLogsRevision((current) => current + 1)}>重新连接</Button>
+            <Button type="primary" onClick={closePodLogsModal}>
+              关闭
+            </Button>
+          </Space>
+        }
+        width={1040}
+        className="pod-workbench-modal pod-logs-modal"
+      >
+        <div className="pod-ops-shell">
+          <div className="pod-ops-toolbar pod-ops-toolbar-spread">
+            <div className="pod-ops-meta">
+              <Tag color={podLogStatusColor(podLogsStatus)}>{podLogStatusLabel(podLogsStatus)}</Tag>
+              {podLogsViewer ? (
+                <Typography.Text type="secondary">
+                  {`${podLogsViewer.pod.namespace} / ${podLogsViewer.pod.name}`}
+                </Typography.Text>
+              ) : null}
+            </div>
+            <Space wrap>
+              {podLogsViewer && podLogsViewer.pod.containers.length > 1 ? (
+                <Select
+                  value={podLogsViewer.container}
+                  onChange={(value) =>
+                    setPodLogsViewer((current) =>
+                      current
+                        ? {
+                            ...current,
+                            container: value,
+                          }
+                        : current,
+                    )
+                  }
+                  options={podLogsViewer.pod.containers.map((container) => ({
+                    label: container,
+                    value: container,
+                  }))}
+                  style={{ minWidth: 220 }}
+                />
+              ) : null}
+              <Switch
+                checked={podLogsAutoScroll}
+                onChange={setPodLogsAutoScroll}
+                checkedChildren="自动跟随"
+                unCheckedChildren="手动滚动"
+              />
+            </Space>
+          </div>
+          {podLogsError ? <Alert type="error" showIcon message={podLogsError} /> : null}
+          <div className="pod-ops-output pod-logs-live-output" ref={podLogsOutputRef}>
+            <pre>
+              {podLogsContent ||
+                (podLogsStatus === 'connecting'
+                  ? '正在连接日志流...'
+                  : '当前容器暂无日志输出。')}
+            </pre>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title={podTerminalWorkspace ? `交互终端 · ${podTerminalWorkspace.pod.name}` : '交互终端'}
+        open={podTerminalOpen}
+        onCancel={closePodTerminalModal}
+        footer={null}
+        width={1040}
+        className="pod-workbench-modal pod-terminal-modal"
+      >
+        <div className="pod-terminal-shell">
+          <div className="pod-terminal-toolbar">
+            <div className="pod-terminal-meta">
+              <strong>{podTerminalWorkspace?.pod.name || 'Pod Terminal'}</strong>
+              <Space size={10} wrap>
+                <Tag color={podTerminalStatusColor(podTerminalStatus)}>
+                  {podTerminalStatusLabel(podTerminalStatus)}
+                </Tag>
+                {podTerminalWorkspace ? (
+                  <Typography.Text type="secondary">
+                    {`${podTerminalWorkspace.pod.namespace} / ${podTerminalWorkspace.pod.nodeName || 'Pending Node'}`}
+                  </Typography.Text>
+                ) : null}
+              </Space>
+            </div>
+            <Space wrap>
+              {podTerminalWorkspace && podTerminalWorkspace.pod.containers.length > 1 ? (
+                <Select
+                  value={podTerminalWorkspace.container}
+                  onChange={(value) =>
+                    setPodTerminalWorkspace((current) =>
+                      current
+                        ? {
+                            ...current,
+                            container: value,
+                          }
+                        : current,
+                    )
+                  }
+                  options={podTerminalWorkspace.pod.containers.map((container) => ({
+                    label: container,
+                    value: container,
+                  }))}
+                  style={{ minWidth: 240 }}
+                />
+              ) : null}
+              <Button icon={<ReloadOutlined />} onClick={() => setPodTerminalRevision((current) => current + 1)}>
+                重新连接
+              </Button>
+              <Button onClick={closePodTerminalModal}>关闭</Button>
+            </Space>
+          </div>
+
+          <div className="pod-terminal-filebar">
+            <div className="pod-terminal-filegroup">
+              <span>上传到</span>
+              <Input
+                value={podTerminalUploadDir}
+                onChange={(event) => setPodTerminalUploadDir(event.target.value)}
+                placeholder="/tmp"
+              />
+              <Button
+                icon={<UploadOutlined />}
+                loading={podTerminalUploading}
+                onClick={() => podTerminalUploadInputRef.current?.click()}
+              >
+                上传文件
+              </Button>
+              <input
+                ref={podTerminalUploadInputRef}
+                type="file"
+                hidden
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) {
+                    void uploadFileToPod(file)
+                  }
+                  event.currentTarget.value = ''
+                }}
+              />
+            </div>
+            <div className="pod-terminal-filegroup">
+              <span>下载路径</span>
+              <Input
+                value={podTerminalDownloadPath}
+                onChange={(event) => setPodTerminalDownloadPath(event.target.value)}
+                onPressEnter={() => void downloadFileFromPod()}
+                placeholder="例如：/tmp/app.log"
+              />
+              <Button
+                icon={<DownloadOutlined />}
+                loading={podTerminalDownloading}
+                onClick={() => void downloadFileFromPod()}
+              >
+                下载
+              </Button>
+            </div>
+          </div>
+
+          {podTerminalError ? <Alert type="error" showIcon message={podTerminalError} /> : null}
+
+          <div className="pod-terminal-surface">
+            <div ref={podTerminalHostRef} className="pod-terminal-canvas" />
+          </div>
+        </div>
+      </Modal>
 
       <Drawer
         title={resourceDrawerTitle(resourceDrawerMode, editingResource)}
@@ -7891,6 +9097,70 @@ function persistSession(session: Session | null) {
 
   window.localStorage.setItem(sessionStorageKey, JSON.stringify(session))
   window.localStorage.removeItem(legacySessionStorageKey)
+}
+
+function resolveDirectApiBase() {
+  return resolveApiBaseUrls()[0] || 'http://127.0.0.1:18081/api'
+}
+
+function resolveDirectWsBase() {
+  const apiBase = resolveDirectApiBase()
+  if (apiBase.startsWith('https://')) {
+    return `wss://${apiBase.slice('https://'.length)}`
+  }
+  if (apiBase.startsWith('http://')) {
+    return `ws://${apiBase.slice('http://'.length)}`
+  }
+  return apiBase
+}
+
+function buildPodTerminalSocketUrl(
+  clusterId: number,
+  namespace: string,
+  podName: string,
+  container: string,
+  token: string,
+) {
+  const params = new URLSearchParams({ namespace })
+  if (container) {
+    params.set('container', container)
+  }
+  if (token) {
+    params.set('access_token', token)
+  }
+
+  return `${resolveDirectWsBase()}/clusters/${clusterId}/pods/${encodeURIComponent(
+    podName,
+  )}/terminal?${params.toString()}`
+}
+
+async function readResponseError(response: Response, fallback: string) {
+  const detail = await response.text()
+  if (!detail) {
+    return fallback
+  }
+
+  try {
+    const parsed = JSON.parse(detail) as { message?: string }
+    if (parsed.message) {
+      return parsed.message
+    }
+  } catch {
+    return detail
+  }
+
+  return fallback
+}
+
+function resolveDownloadFileName(response: Response, remotePath: string) {
+  const disposition = response.headers.get('content-disposition') || ''
+  const match = disposition.match(/filename="([^"]+)"/i)
+  if (match?.[1]) {
+    return match[1]
+  }
+
+  const parts = remotePath.split('/').filter(Boolean)
+  return parts[parts.length - 1] || 'download'
 }
 
 function formatDate(value?: string | null) {
@@ -8568,6 +9838,214 @@ function deploymentConditionTagColor(status: string) {
       return 'red'
     default:
       return 'gold'
+  }
+}
+
+function resolveWorkloadStatus(
+  resource: K8sObject | null,
+  deploymentInsight: DeploymentInsight | null,
+  pods: WorkloadPod[],
+) {
+  if (deploymentInsight) {
+    return {
+      label: deploymentInsight.rolloutLabel,
+      tone: deploymentInsight.rolloutTone,
+    }
+  }
+
+  const runningCount = pods.filter((pod) => pod.phase === 'Running').length
+  if (runningCount === pods.length && pods.length > 0) {
+    return {
+      label: '运行中',
+      tone: 'success' as const,
+    }
+  }
+  if (pods.length > 0) {
+    return {
+      label: '处理中',
+      tone: 'processing' as const,
+    }
+  }
+
+  const readyCount =
+    readNumberValue(resource, ['status', 'readyReplicas']) ??
+    readNumberValue(resource, ['status', 'availableReplicas']) ??
+    0
+  const desiredCount = readNumberValue(resource, ['spec', 'replicas']) ?? 0
+
+  if (desiredCount > 0 && readyCount >= desiredCount) {
+    return {
+      label: '运行中',
+      tone: 'success' as const,
+    }
+  }
+
+  return {
+    label: '待调度',
+    tone: 'warning' as const,
+  }
+}
+
+function resolveWorkloadPolicy(resource: K8sObject | null, deploymentInsight: DeploymentInsight | null) {
+  if (deploymentInsight) {
+    return deploymentInsight.strategyType
+  }
+
+  if (valueAsString(resource?.kind) === 'StatefulSet') {
+    return valueAsString(readNestedValue(resource, ['spec', 'updateStrategy', 'type'])) || 'RollingUpdate'
+  }
+
+  if (valueAsString(resource?.kind) === 'DaemonSet') {
+    return valueAsString(readNestedValue(resource, ['spec', 'updateStrategy', 'type'])) || 'RollingUpdate'
+  }
+
+  if (valueAsString(resource?.kind) === 'CronJob') {
+    return valueAsString(readNestedValue(resource, ['spec', 'schedule'])) || '按计划执行'
+  }
+
+  if (valueAsString(resource?.kind) === 'Job') {
+    return 'RunToCompletion'
+  }
+
+  return '-'
+}
+
+function resolveWorkloadReplicaSummary(
+  resource: K8sObject | null,
+  deploymentInsight: DeploymentInsight | null,
+  pods: WorkloadPod[],
+) {
+  if (deploymentInsight) {
+    return `${deploymentInsight.ready}/${deploymentInsight.desired}`
+  }
+
+  const desiredCount = readNumberValue(resource, ['spec', 'replicas']) ?? pods.length
+  const runningCount = pods.filter((pod) => pod.phase === 'Running').length
+
+  if (desiredCount === 0 && pods.length === 0) {
+    return '-'
+  }
+
+  return `${runningCount}/${desiredCount || pods.length}`
+}
+
+function buildResourceContainerDetails(resource: K8sObject | null): ResourceContainerDetail[] {
+  return findContainerSpecs(resource).map((container) => {
+    const resources = asRecord(container.resources)
+    const requests = asRecord(resources?.requests)
+    const limits = asRecord(resources?.limits)
+    const ports = Array.isArray(container.ports)
+      ? container.ports
+          .map((entry) => {
+            const record = asRecord(entry)
+            const protocol = valueAsString(record?.protocol) || 'TCP'
+            const port = typeof record?.containerPort === 'number' ? String(record.containerPort) : ''
+            return port ? `${port}/${protocol}` : ''
+          })
+          .filter(Boolean)
+          .join(', ')
+      : ''
+
+    return {
+      name: valueAsString(container.name) || 'container',
+      image: valueAsString(container.image),
+      imagePullPolicy: valueAsString(container.imagePullPolicy),
+      ports,
+      cpuRequest: valueAsString(requests?.cpu),
+      cpuLimit: valueAsString(limits?.cpu),
+      memoryRequest: valueAsString(requests?.memory),
+      memoryLimit: valueAsString(limits?.memory),
+    }
+  })
+}
+
+function supportsPodOperations(resourceType?: string | null) {
+  return ['deployment', 'statefulset', 'daemonset', 'job', 'cronjob'].includes(
+    resourceType || '',
+  )
+}
+
+function podPhaseLabel(phase?: string | null) {
+  switch (phase) {
+    case 'Running':
+      return '运行中'
+    case 'Succeeded':
+      return '完成'
+    case 'Pending':
+      return '等待中'
+    case 'Failed':
+      return '失败'
+    case 'Terminating':
+      return '终止中'
+    default:
+      return phase || '未知'
+  }
+}
+
+function podPhaseColor(phase?: string | null) {
+  switch (phase) {
+    case 'Running':
+    case 'Succeeded':
+      return 'green'
+    case 'Pending':
+    case 'Terminating':
+      return 'gold'
+    case 'Failed':
+      return 'red'
+    default:
+      return 'default'
+  }
+}
+
+function podLogStatusLabel(status: PodLogStreamStatus) {
+  switch (status) {
+    case 'connecting':
+      return '连接中'
+    case 'live':
+      return '实时中'
+    case 'error':
+      return '异常'
+    default:
+      return '已停止'
+  }
+}
+
+function podLogStatusColor(status: PodLogStreamStatus) {
+  switch (status) {
+    case 'connecting':
+      return 'processing'
+    case 'live':
+      return 'green'
+    case 'error':
+      return 'red'
+    default:
+      return 'default'
+  }
+}
+
+function podTerminalStatusLabel(status: PodTerminalStatus) {
+  switch (status) {
+    case 'connecting':
+      return '连接中'
+    case 'connected':
+      return '已连接'
+    case 'error':
+      return '异常'
+    default:
+      return '已断开'
+  }
+}
+
+function podTerminalStatusColor(status: PodTerminalStatus) {
+  switch (status) {
+    case 'connecting':
+      return 'processing'
+    case 'connected':
+      return 'green'
+    case 'error':
+      return 'red'
+    default:
+      return 'default'
   }
 }
 

@@ -129,7 +129,7 @@ function safeParse(value: string) {
   }
 }
 
-function resolveApiBaseUrls() {
+export function resolveApiBaseUrls() {
   const candidates: string[] = []
   const envBase = import.meta.env.VITE_API_BASE_URL?.trim()
   if (envBase) {
@@ -149,7 +149,7 @@ function resolveApiBaseUrls() {
   return candidates.filter((value, index, all) => all.indexOf(value) === index)
 }
 
-function trimTrailingSlash(value: string) {
+export function trimTrailingSlash(value: string) {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
 

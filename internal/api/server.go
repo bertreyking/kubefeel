@@ -100,6 +100,13 @@ func (s *Server) Run() error {
 		api.POST("/clusters/:id/resources/:resourceType", s.requirePermission(rbac.PermissionResourcesWrite), s.createResource)
 		api.PUT("/clusters/:id/resources/:resourceType/:name", s.requirePermission(rbac.PermissionResourcesWrite), s.updateResource)
 		api.DELETE("/clusters/:id/resources/:resourceType/:name", s.requirePermission(rbac.PermissionResourcesWrite), s.deleteResource)
+		api.GET("/clusters/:id/workloads/:resourceType/:name/pods", s.requirePermission(rbac.PermissionResourcesRead), s.listWorkloadPods)
+		api.GET("/clusters/:id/pods/:name/logs", s.requirePermission(rbac.PermissionResourcesRead), s.getPodLogs)
+		api.GET("/clusters/:id/pods/:name/logs/stream", s.requirePermission(rbac.PermissionResourcesRead), s.streamPodLogs)
+		api.POST("/clusters/:id/pods/:name/exec", s.requirePermission(rbac.PermissionResourcesWrite), s.execPodCommand)
+		api.GET("/clusters/:id/pods/:name/terminal", s.requirePermission(rbac.PermissionResourcesWrite), s.openPodTerminal)
+		api.POST("/clusters/:id/pods/:name/files/upload", s.requirePermission(rbac.PermissionResourcesWrite), s.uploadPodFile)
+		api.GET("/clusters/:id/pods/:name/files/download", s.requirePermission(rbac.PermissionResourcesRead), s.downloadPodFile)
 		api.POST("/app-templates/deploy", s.requirePermission(rbac.PermissionResourcesWrite), s.deployAppTemplate)
 
 		api.GET("/users", s.requirePermission(rbac.PermissionUsersRead), s.listUsers)

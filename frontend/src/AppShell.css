@@ -1057,6 +1057,309 @@
   gap: 18px;
 }
 
+.workload-detail-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.workload-detail-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.workload-detail-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: #627883;
+  font-size: 0.92rem;
+}
+
+.workload-detail-breadcrumb strong {
+  color: #10202b;
+}
+
+.workload-detail-section {
+  display: grid;
+  gap: 12px;
+}
+
+.workload-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.workload-section-head strong {
+  color: #10202b;
+  font-size: 1rem;
+}
+
+.workload-overview-panel {
+  display: grid;
+  gap: 18px;
+  padding: 22px 24px;
+  border-radius: 22px;
+  background: #ffffff;
+  border: 1px solid rgba(16, 32, 43, 0.06);
+  box-shadow: 0 18px 40px rgba(18, 40, 58, 0.06);
+}
+
+.workload-overview-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.workload-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px 28px;
+}
+
+.workload-overview-cell {
+  display: grid;
+  gap: 6px;
+}
+
+.workload-overview-cell strong {
+  color: #10202b;
+  font-size: 1.02rem;
+  font-weight: 600;
+}
+
+.workload-overview-cell span {
+  color: #7a8e9a;
+  font-size: 0.84rem;
+}
+
+.status-text-success {
+  color: #23914f !important;
+}
+
+.status-text-warning {
+  color: #d48806 !important;
+}
+
+.status-text-processing {
+  color: #0f6c7b !important;
+}
+
+.workload-detail-tabs .ant-tabs-nav {
+  margin-bottom: 14px;
+}
+
+.workload-tab-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.workload-tab-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.workload-search {
+  max-width: 420px;
+}
+
+.workload-info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.workload-info-panel {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  background: #ffffff;
+  border: 1px solid rgba(16, 32, 43, 0.06);
+}
+
+.workload-history-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.resource-detail-placeholder {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 0;
+}
+
+.pod-ops-table .ant-table {
+  background: transparent;
+}
+
+.pod-ops-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.pod-ops-toolbar {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.pod-ops-toolbar-spread {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pod-ops-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.pod-ops-output {
+  min-height: 220px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(16, 32, 43, 0.08);
+  background: #0f1720;
+  overflow: auto;
+}
+
+.pod-ops-output pre {
+  margin: 0;
+  color: #e7f3f8;
+  font-size: 0.84rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.pod-ops-output-muted {
+  background: #16212b;
+}
+
+.pod-workbench-modal .ant-modal-content {
+  overflow: hidden;
+  border-radius: 24px;
+  padding-bottom: 20px;
+}
+
+.pod-workbench-modal .ant-modal-body {
+  padding-top: 8px;
+}
+
+.pod-workbench-modal .ant-modal-footer {
+  padding-top: 14px;
+}
+
+.pod-logs-live-output {
+  min-height: 460px;
+  max-height: 62vh;
+}
+
+.pod-exec-result-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.pod-terminal-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.pod-terminal-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.pod-terminal-meta {
+  display: grid;
+  gap: 8px;
+}
+
+.pod-terminal-meta strong {
+  color: #10202b;
+  font-size: 1.06rem;
+}
+
+.pod-terminal-filebar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pod-terminal-filegroup {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: #f5f8fa;
+  border: 1px solid rgba(16, 32, 43, 0.06);
+}
+
+.pod-terminal-filegroup span {
+  color: #627883;
+  font-size: 0.84rem;
+}
+
+.pod-terminal-surface {
+  min-height: 52vh;
+  padding: 14px;
+  border-radius: 22px;
+  background: #06111a;
+  border: 1px solid rgba(10, 23, 34, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.pod-terminal-canvas {
+  width: 100%;
+  height: 52vh;
+}
+
+@media (max-width: 1100px) {
+  .workload-detail-toolbar,
+  .workload-overview-title,
+  .workload-tab-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workload-overview-grid,
+  .workload-info-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pod-terminal-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pod-terminal-filebar {
+    grid-template-columns: 1fr;
+  }
+
+  .pod-terminal-filegroup {
+    grid-template-columns: 1fr;
+  }
+
+  .workload-search {
+    max-width: none;
+  }
+}
+
 .grafana-frame {
   width: 100%;
   min-height: calc(100vh - 56px);

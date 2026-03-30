@@ -11,6 +11,7 @@ import (
 
 	discovery "k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
@@ -20,6 +21,7 @@ type Runtime struct {
 	Config    *rest.Config
 	Dynamic   dynamic.Interface
 	Discovery discovery.DiscoveryInterface
+	Clientset kubernetes.Interface
 }
 
 type Factory struct {
@@ -72,6 +74,11 @@ func BuildRuntimeFromKubeconfig(kubeconfig []byte) (*Runtime, error) {
 	config.Burst = 60
 	config.Timeout = 15 * time.Second
 
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, err
@@ -86,6 +93,7 @@ func BuildRuntimeFromKubeconfig(kubeconfig []byte) (*Runtime, error) {
 		Config:    config,
 		Dynamic:   dynamicClient,
 		Discovery: discoveryClient,
+		Clientset: clientset,
 	}, nil
 }
 
