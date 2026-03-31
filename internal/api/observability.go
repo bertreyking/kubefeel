@@ -12,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -351,18 +352,12 @@ func (s *Server) listGrafanaCatalog(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
-		source.Status = "error"
-		source.LastError = err.Error()
-		source.LastCheckedAt = nowPtr()
-		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录加载失败: %v", err))
-		return
-	}
-
-	items, err := listGrafanaSearchItems(c.Request.Context(), endpoint, sessionCookieHeader)
-	if err != nil {
+	var items []grafanaSearchItem
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		var innerErr error
+		items, innerErr = listGrafanaSearchItems(c.Request.Context(), endpoint, sessionCookieHeader)
+		return innerErr
+	}); err != nil {
 		source.Status = "error"
 		source.LastError = err.Error()
 		source.LastCheckedAt = nowPtr()
@@ -404,30 +399,25 @@ func (s *Server) createGrafanaFolder(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
+	var response grafanaFolderResponse
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		payload := map[string]any{
+			"title": title,
+		}
+		return doGrafanaJSONRequest(
+			c.Request.Context(),
+			endpoint,
+			sessionCookieHeader,
+			http.MethodPost,
+			"/api/folders",
+			payload,
+			&response,
+		)
+	}); err != nil {
 		source.Status = "error"
 		source.LastError = err.Error()
 		source.LastCheckedAt = nowPtr()
 		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录创建失败: %v", err))
-		return
-	}
-
-	payload := map[string]any{
-		"title": title,
-	}
-
-	var response grafanaFolderResponse
-	if err := doGrafanaJSONRequest(
-		c.Request.Context(),
-		endpoint,
-		sessionCookieHeader,
-		http.MethodPost,
-		"/api/folders",
-		payload,
-		&response,
-	); err != nil {
 		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录创建失败: %v", err))
 		return
 	}
@@ -469,36 +459,31 @@ func (s *Server) updateGrafanaFolder(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
+	var response grafanaFolderResponse
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		folderDetail, err := getGrafanaFolderDetail(c.Request.Context(), endpoint, sessionCookieHeader, folderUID)
+		if err != nil {
+			return err
+		}
+
+		return doGrafanaJSONRequest(
+			c.Request.Context(),
+			endpoint,
+			sessionCookieHeader,
+			http.MethodPut,
+			"/api/folders/"+folderUID,
+			map[string]any{
+				"title":     title,
+				"version":   folderDetail.Version,
+				"overwrite": true,
+			},
+			&response,
+		)
+	}); err != nil {
 		source.Status = "error"
 		source.LastError = err.Error()
 		source.LastCheckedAt = nowPtr()
 		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录更新失败: %v", err))
-		return
-	}
-
-	folderDetail, err := getGrafanaFolderDetail(c.Request.Context(), endpoint, sessionCookieHeader, folderUID)
-	if err != nil {
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录更新失败: %v", err))
-		return
-	}
-
-	var response grafanaFolderResponse
-	if err := doGrafanaJSONRequest(
-		c.Request.Context(),
-		endpoint,
-		sessionCookieHeader,
-		http.MethodPut,
-		"/api/folders/"+folderUID,
-		map[string]any{
-			"title":     title,
-			"version":   folderDetail.Version,
-			"overwrite": true,
-		},
-		&response,
-	); err != nil {
 		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录更新失败: %v", err))
 		return
 	}
@@ -528,38 +513,37 @@ func (s *Server) deleteGrafanaFolder(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
-		source.Status = "error"
-		source.LastError = err.Error()
-		source.LastCheckedAt = nowPtr()
-		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录删除失败: %v", err))
-		return
-	}
-
-	items, err := listGrafanaSearchItems(c.Request.Context(), endpoint, sessionCookieHeader)
-	if err != nil {
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录删除失败: %v", err))
-		return
-	}
-	for _, item := range items {
-		if item.Type == "dash-db" && strings.TrimSpace(item.FolderUID) == folderUID {
-			respondError(c, http.StatusBadRequest, "目录下仍有仪表盘，请先迁移或删除目录内仪表盘")
-			return
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		items, err := listGrafanaSearchItems(c.Request.Context(), endpoint, sessionCookieHeader)
+		if err != nil {
+			return err
 		}
-	}
+		for _, item := range items {
+			if item.Type == "dash-db" && strings.TrimSpace(item.FolderUID) == folderUID {
+				return httpError("目录下仍有仪表盘，请先迁移或删除目录内仪表盘")
+			}
+		}
 
-	if err := doGrafanaJSONRequest(
-		c.Request.Context(),
-		endpoint,
-		sessionCookieHeader,
-		http.MethodDelete,
-		"/api/folders/"+folderUID,
-		nil,
-		nil,
-	); err != nil {
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 目录删除失败: %v", err))
+		return doGrafanaJSONRequest(
+			c.Request.Context(),
+			endpoint,
+			sessionCookieHeader,
+			http.MethodDelete,
+			"/api/folders/"+folderUID,
+			nil,
+			nil,
+		)
+	}); err != nil {
+		status := http.StatusBadGateway
+		if err.Error() == "目录下仍有仪表盘，请先迁移或删除目录内仪表盘" {
+			status = http.StatusBadRequest
+		} else {
+			source.Status = "error"
+			source.LastError = err.Error()
+			source.LastCheckedAt = nowPtr()
+			_ = s.db.Save(source).Error
+		}
+		respondError(c, status, fmt.Sprintf("Grafana 目录删除失败: %v", err))
 		return
 	}
 
@@ -595,16 +579,6 @@ func (s *Server) createGrafanaDashboard(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
-		source.Status = "error"
-		source.LastError = err.Error()
-		source.LastCheckedAt = nowPtr()
-		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘创建失败: %v", err))
-		return
-	}
-
 	requestBody := map[string]any{
 		"dashboard": dashboard,
 		"overwrite": false,
@@ -616,15 +590,21 @@ func (s *Server) createGrafanaDashboard(c *gin.Context) {
 	}
 
 	var response grafanaDashboardCreateResponse
-	if err := doGrafanaJSONRequest(
-		c.Request.Context(),
-		endpoint,
-		sessionCookieHeader,
-		http.MethodPost,
-		"/api/dashboards/db",
-		requestBody,
-		&response,
-	); err != nil {
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		return doGrafanaJSONRequest(
+			c.Request.Context(),
+			endpoint,
+			sessionCookieHeader,
+			http.MethodPost,
+			"/api/dashboards/db",
+			requestBody,
+			&response,
+		)
+	}); err != nil {
+		source.Status = "error"
+		source.LastError = err.Error()
+		source.LastCheckedAt = nowPtr()
+		_ = s.db.Save(source).Error
 		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘创建失败: %v", err))
 		return
 	}
@@ -658,18 +638,16 @@ func (s *Server) getGrafanaDashboardMeta(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
+	var dashboardDetail grafanaDashboardDetailResponse
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		var innerErr error
+		dashboardDetail, innerErr = getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
+		return innerErr
+	}); err != nil {
 		source.Status = "error"
 		source.LastError = err.Error()
 		source.LastCheckedAt = nowPtr()
 		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘信息加载失败: %v", err))
-		return
-	}
-
-	dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
-	if err != nil {
 		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘信息加载失败: %v", err))
 		return
 	}
@@ -729,56 +707,54 @@ func (s *Server) updateGrafanaDashboard(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
-		source.Status = "error"
-		source.LastError = err.Error()
-		source.LastCheckedAt = nowPtr()
-		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘更新失败: %v", err))
-		return
-	}
-
-	dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
-	if err != nil {
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘更新失败: %v", err))
-		return
-	}
-	if dashboardDetail.Dashboard == nil {
-		respondError(c, http.StatusBadGateway, "Grafana 仪表盘更新失败: 仪表盘内容为空")
-		return
-	}
-	if dashboardDetail.Meta.Provisioned || !dashboardDetail.Meta.CanSave || !dashboardDetail.Meta.CanEdit {
-		respondError(c, http.StatusBadRequest, "当前仪表盘处于只读保护状态，不能直接修改；请先保存为自定义副本后再调整目录或标题")
-		return
-	}
-
-	dashboardDetail.Dashboard["title"] = title
-	dashboardDetail.Dashboard["tags"] = normalizeGrafanaTags(input.Tags)
-
-	requestBody := map[string]any{
-		"dashboard": dashboardDetail.Dashboard,
-		"overwrite": true,
-		"message":   "updated via KubeFeel",
-	}
-
-	if folderUID := normalizeGrafanaFolderUID(input.FolderUID); folderUID != "" {
-		requestBody["folderUid"] = folderUID
-	} else {
-		requestBody["folderId"] = 0
-	}
-
 	var response grafanaDashboardCreateResponse
-	if err := doGrafanaJSONRequest(
-		c.Request.Context(),
-		endpoint,
-		sessionCookieHeader,
-		http.MethodPost,
-		"/api/dashboards/db",
-		requestBody,
-		&response,
-	); err != nil {
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘更新失败: %v", err))
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
+		if err != nil {
+			return err
+		}
+		if dashboardDetail.Dashboard == nil {
+			return httpError("Grafana 仪表盘更新失败: 仪表盘内容为空")
+		}
+		if dashboardDetail.Meta.Provisioned || !dashboardDetail.Meta.CanSave || !dashboardDetail.Meta.CanEdit {
+			return httpError("当前仪表盘处于只读保护状态，不能直接修改；请先保存为自定义副本后再调整目录或标题")
+		}
+
+		dashboardDetail.Dashboard["title"] = title
+		dashboardDetail.Dashboard["tags"] = normalizeGrafanaTags(input.Tags)
+
+		requestBody := map[string]any{
+			"dashboard": dashboardDetail.Dashboard,
+			"overwrite": true,
+			"message":   "updated via KubeFeel",
+		}
+
+		if folderUID := normalizeGrafanaFolderUID(input.FolderUID); folderUID != "" {
+			requestBody["folderUid"] = folderUID
+		} else {
+			requestBody["folderId"] = 0
+		}
+
+		return doGrafanaJSONRequest(
+			c.Request.Context(),
+			endpoint,
+			sessionCookieHeader,
+			http.MethodPost,
+			"/api/dashboards/db",
+			requestBody,
+			&response,
+		)
+	}); err != nil {
+		status := http.StatusBadGateway
+		if strings.Contains(err.Error(), "只读保护状态") || strings.Contains(err.Error(), "仪表盘内容为空") {
+			status = http.StatusBadRequest
+		} else {
+			source.Status = "error"
+			source.LastError = err.Error()
+			source.LastCheckedAt = nowPtr()
+			_ = s.db.Save(source).Error
+		}
+		respondError(c, status, fmt.Sprintf("Grafana 仪表盘更新失败: %v", err))
 		return
 	}
 
@@ -811,36 +787,35 @@ func (s *Server) deleteGrafanaDashboard(c *gin.Context) {
 		return
 	}
 
-	sessionCookieHeader, err := s.ensureGrafanaSession(c.Request.Context(), source.ID, endpoint)
-	if err != nil {
-		source.Status = "error"
-		source.LastError = err.Error()
-		source.LastCheckedAt = nowPtr()
-		_ = s.db.Save(source).Error
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘删除失败: %v", err))
-		return
-	}
+	if err := s.withGrafanaSessionRetry(c.Request.Context(), source.ID, endpoint, func(sessionCookieHeader string) error {
+		dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
+		if err != nil {
+			return err
+		}
+		if dashboardDetail.Meta.Provisioned || !dashboardDetail.Meta.CanDelete {
+			return httpError("当前仪表盘处于只读保护状态，不能直接删除；如需调整请先保存为自定义副本")
+		}
 
-	dashboardDetail, err := getGrafanaDashboardDetail(c.Request.Context(), endpoint, sessionCookieHeader, dashboardUID)
-	if err != nil {
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘删除失败: %v", err))
-		return
-	}
-	if dashboardDetail.Meta.Provisioned || !dashboardDetail.Meta.CanDelete {
-		respondError(c, http.StatusBadRequest, "当前仪表盘处于只读保护状态，不能直接删除；如需调整请先保存为自定义副本")
-		return
-	}
-
-	if err := doGrafanaJSONRequest(
-		c.Request.Context(),
-		endpoint,
-		sessionCookieHeader,
-		http.MethodDelete,
-		"/api/dashboards/uid/"+dashboardUID,
-		nil,
-		nil,
-	); err != nil {
-		respondError(c, http.StatusBadGateway, fmt.Sprintf("Grafana 仪表盘删除失败: %v", err))
+		return doGrafanaJSONRequest(
+			c.Request.Context(),
+			endpoint,
+			sessionCookieHeader,
+			http.MethodDelete,
+			"/api/dashboards/uid/"+dashboardUID,
+			nil,
+			nil,
+		)
+	}); err != nil {
+		status := http.StatusBadGateway
+		if strings.Contains(err.Error(), "只读保护状态") {
+			status = http.StatusBadRequest
+		} else {
+			source.Status = "error"
+			source.LastError = err.Error()
+			source.LastCheckedAt = nowPtr()
+			_ = s.db.Save(source).Error
+		}
+		respondError(c, status, fmt.Sprintf("Grafana 仪表盘删除失败: %v", err))
 		return
 	}
 
@@ -853,6 +828,12 @@ func (s *Server) deleteGrafanaDashboard(c *gin.Context) {
 }
 
 func (s *Server) proxyGrafana(c *gin.Context) {
+	requestedProxyPath := normalizeGrafanaProxyPath(c.Param("proxyPath"))
+	if status, err := validateGrafanaProxyRequest(c.Request.Method, requestedProxyPath); err != nil {
+		respondError(c, status, err.Error())
+		return
+	}
+
 	source, endpoint, err := s.loadObservabilityEndpoint(c, true)
 	if err != nil {
 		return
@@ -884,7 +865,7 @@ func (s *Server) proxyGrafana(c *gin.Context) {
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-		proxyPath := strings.TrimSpace(c.Param("proxyPath"))
+		proxyPath := requestedProxyPath
 		if proxyPath == "" || proxyPath == "/" {
 			proxyPath = normalizeDashboardPath(source.DashboardPath, "grafana")
 		}
@@ -910,26 +891,53 @@ func (s *Server) proxyGrafana(c *gin.Context) {
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: endpoint.SkipTLSVerify}, //nolint:gosec
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		s.refreshGrafanaSessionCacheFromResponse(source.ID, resp)
 		if location := strings.TrimSpace(resp.Header.Get("Location")); strings.HasPrefix(location, "/") {
 			resp.Header.Set("Location", proxyPrefix+location)
 		}
+
+		contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+		var body []byte
+		bodyLoaded := false
+		if resp.StatusCode == http.StatusUnauthorized {
+			var readErr error
+			body, readErr = io.ReadAll(resp.Body)
+			if readErr != nil {
+				return readErr
+			}
+			_ = resp.Body.Close()
+			bodyLoaded = true
+			if isGrafanaSessionAuthMessage(string(body)) {
+				s.clearGrafanaSessionCache(source.ID)
+			}
+		}
+
 		resp.Header.Del("Set-Cookie")
+		// Grafana 默认会返回禁止 iframe 的响应头，平台的沉浸式仪表盘必须移除这些头才能正常嵌入。
 		resp.Header.Del("X-Frame-Options")
 		resp.Header.Del("Frame-Options")
 		resp.Header.Del("Content-Security-Policy")
 		resp.Header.Del("Content-Security-Policy-Report-Only")
 
-		if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
-			body, readErr := io.ReadAll(resp.Body)
-			if readErr != nil {
-				return readErr
+		if strings.Contains(contentType, "text/html") {
+			if !bodyLoaded {
+				var readErr error
+				body, readErr = io.ReadAll(resp.Body)
+				if readErr != nil {
+					return readErr
+				}
+				_ = resp.Body.Close()
 			}
-			_ = resp.Body.Close()
-
 			rewritten := rewriteGrafanaHTML(body, proxyPrefix)
 			resp.Body = io.NopCloser(bytes.NewReader(rewritten))
 			resp.ContentLength = int64(len(rewritten))
 			resp.Header.Set("Content-Length", strconv.Itoa(len(rewritten)))
+			return nil
+		}
+		if bodyLoaded {
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			resp.ContentLength = int64(len(body))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 		}
 		return nil
 	}
@@ -959,6 +967,38 @@ func (s *Server) ensureGrafanaSession(
 	}
 	s.storeGrafanaSessionCache(sourceID, cookieHeader, expiresAt)
 	return cookieHeader, nil
+}
+
+func (s *Server) withGrafanaSessionRetry(
+	ctx context.Context,
+	sourceID uint,
+	endpoint integration.EndpointConfig,
+	fn func(sessionCookieHeader string) error,
+) error {
+	shouldRetry := strings.TrimSpace(endpoint.Username) != "" && strings.TrimSpace(endpoint.Secret) != ""
+	attempts := 1
+	if shouldRetry {
+		attempts = 2
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		sessionCookieHeader, err := s.ensureGrafanaSession(ctx, sourceID, endpoint)
+		if err != nil {
+			return err
+		}
+		if err := fn(sessionCookieHeader); err != nil {
+			lastErr = err
+			if !shouldRetry || attempt == attempts-1 || !isGrafanaSessionAuthError(err) {
+				return err
+			}
+			s.clearGrafanaSessionCache(sourceID)
+			continue
+		}
+		return nil
+	}
+
+	return lastErr
 }
 
 func loginGrafanaSession(
@@ -1063,6 +1103,37 @@ func (s *Server) clearGrafanaSessionCache(sourceID uint) {
 	s.cacheMu.Lock()
 	delete(s.grafanaSessionCache, sourceID)
 	s.cacheMu.Unlock()
+}
+
+func (s *Server) refreshGrafanaSessionCacheFromResponse(sourceID uint, response *http.Response) {
+	if response == nil {
+		return
+	}
+	cookieHeader, expiresAt := buildCookieHeader(response.Cookies())
+	if cookieHeader == "" {
+		return
+	}
+	s.storeGrafanaSessionCache(sourceID, cookieHeader, expiresAt)
+}
+
+func isGrafanaSessionAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isGrafanaSessionAuthMessage(err.Error())
+}
+
+func isGrafanaSessionAuthMessage(message string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(message))
+	if lowered == "" {
+		return false
+	}
+	return strings.Contains(lowered, "session.token.rotate") ||
+		strings.Contains(lowered, "\"statuscode\":401") ||
+		strings.Contains(lowered, "statuscode\":401") ||
+		strings.Contains(lowered, "unauthorized") ||
+		strings.Contains(lowered, "invalid username or password") ||
+		strings.Contains(lowered, "session validation failed: http 401")
 }
 
 func buildCookieHeader(cookies []*http.Cookie) (string, time.Time) {
@@ -1579,15 +1650,50 @@ func (s *Server) probeObservabilitySource(
 	if strings.TrimSpace(input.Type) == "grafana" &&
 		strings.TrimSpace(input.Username) != "" &&
 		strings.TrimSpace(input.Secret) != "" {
-		if _, _, err := loginGrafanaSession(ctx, integration.EndpointConfig{
+		sessionCookieHeader, _, err := loginGrafanaSession(ctx, integration.EndpointConfig{
 			Endpoint:      strings.TrimSpace(input.Endpoint),
 			Username:      strings.TrimSpace(input.Username),
 			Secret:        strings.TrimSpace(input.Secret),
 			SkipTLSVerify: input.SkipTLSVerify,
-		}); err != nil {
+		})
+		if err != nil {
 			return integration.ObservabilityProbe{}, fmt.Errorf("grafana web login failed: %w", err)
 		}
-		probe.Message = "Grafana 已连通，且 Web 登录凭据已校验。"
+		if _, err := listGrafanaSearchItems(ctx, integration.EndpointConfig{
+			Endpoint:      strings.TrimSpace(input.Endpoint),
+			Username:      strings.TrimSpace(input.Username),
+			Secret:        strings.TrimSpace(input.Secret),
+			SkipTLSVerify: input.SkipTLSVerify,
+		}, sessionCookieHeader); err != nil {
+			return integration.ObservabilityProbe{}, fmt.Errorf("grafana catalog check failed: %w", err)
+		}
+		if err := probeGrafanaWorkspaceAccess(ctx, integration.EndpointConfig{
+			Endpoint:      strings.TrimSpace(input.Endpoint),
+			Username:      strings.TrimSpace(input.Username),
+			Secret:        strings.TrimSpace(input.Secret),
+			SkipTLSVerify: input.SkipTLSVerify,
+		}, sessionCookieHeader, input.DashboardPath); err != nil {
+			return integration.ObservabilityProbe{}, fmt.Errorf("grafana workspace path check failed: %w", err)
+		}
+		probe.Message = "Grafana 已连通，目录接口和默认入口均可访问。"
+	} else if strings.TrimSpace(input.Type) == "grafana" {
+		if _, err := listGrafanaSearchItems(ctx, integration.EndpointConfig{
+			Endpoint:      strings.TrimSpace(input.Endpoint),
+			Username:      strings.TrimSpace(input.Username),
+			Secret:        strings.TrimSpace(input.Secret),
+			SkipTLSVerify: input.SkipTLSVerify,
+		}, ""); err != nil {
+			return integration.ObservabilityProbe{}, fmt.Errorf("grafana catalog check failed: %w", err)
+		}
+		if err := probeGrafanaWorkspaceAccess(ctx, integration.EndpointConfig{
+			Endpoint:      strings.TrimSpace(input.Endpoint),
+			Username:      strings.TrimSpace(input.Username),
+			Secret:        strings.TrimSpace(input.Secret),
+			SkipTLSVerify: input.SkipTLSVerify,
+		}, "", input.DashboardPath); err != nil {
+			return integration.ObservabilityProbe{}, fmt.Errorf("grafana workspace path check failed: %w", err)
+		}
+		probe.Message = "Grafana 已连通，目录接口和默认入口均可访问。"
 	}
 
 	return probe, nil
@@ -1618,6 +1724,101 @@ func normalizeDashboardPath(raw string, kind string) string {
 		return ""
 	}
 	return integration.BuildGrafanaEmbedPath(raw)
+}
+
+func probeGrafanaWorkspaceAccess(
+	ctx context.Context,
+	endpoint integration.EndpointConfig,
+	sessionCookieHeader string,
+	rawPath string,
+) error {
+	targetURL, err := url.Parse(endpoint.Endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid grafana endpoint: %w", err)
+	}
+
+	requestURL := targetURL.ResolveReference(&url.URL{
+		Path: joinProxyPath(targetURL.Path, normalizeDashboardPath(rawPath, "grafana")),
+	})
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return err
+	}
+	applyGrafanaAuthHeaders(request, endpoint, sessionCookieHeader)
+
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: endpoint.SkipTLSVerify}, //nolint:gosec
+		},
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.Request != nil && strings.Contains(response.Request.URL.Path, "/login") {
+		return fmt.Errorf("workspace redirected to login")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 32*1024))
+		return fmt.Errorf("workspace returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	return nil
+}
+
+func validateGrafanaProxyRequest(method string, rawPath string) (int, error) {
+	normalizedMethod := strings.ToUpper(strings.TrimSpace(method))
+	cleanedPath := normalizeGrafanaProxyPath(rawPath)
+	if cleanedPath == "" {
+		cleanedPath = "/"
+	}
+
+	switch normalizedMethod {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return http.StatusOK, nil
+	case http.MethodPost:
+		if isAllowedGrafanaQueryPostPath(cleanedPath) {
+			return http.StatusOK, nil
+		}
+		return http.StatusForbidden, fmt.Errorf("当前 Grafana 代理只允许只读查询，不允许该写入请求")
+	default:
+		return http.StatusMethodNotAllowed, fmt.Errorf("当前 Grafana 代理不允许 %s 请求", normalizedMethod)
+	}
+}
+
+func normalizeGrafanaProxyPath(rawPath string) string {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" || trimmed == "/" {
+		return "/"
+	}
+
+	cleaned := path.Clean("/" + strings.TrimLeft(trimmed, "/"))
+	if cleaned == "." {
+		return "/"
+	}
+	return cleaned
+}
+
+func isAllowedGrafanaQueryPostPath(path string) bool {
+	return hasGrafanaProxyPrefix(path,
+		"/api/ds/query",
+		"/api/datasources/proxy/",
+		"/api/annotations",
+	)
+}
+
+func hasGrafanaProxyPrefix(path string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func joinProxyPath(basePath string, proxyPath string) string {

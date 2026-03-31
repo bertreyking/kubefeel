@@ -57,6 +57,8 @@ import {
   FolderOpenOutlined,
   FundProjectionScreenOutlined,
   LogoutOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
   PlusOutlined,
   ReloadOutlined,
   RightOutlined,
@@ -102,6 +104,10 @@ import type {
   Role,
   Session,
   User,
+  WorkloadRelations,
+  WorkloadHistory,
+  WorkloadHistoryItem,
+  WorkloadRelatedResource,
   WorkloadPod,
 } from './types'
 
@@ -269,7 +275,7 @@ type GrafanaDashboardSubmitMode = 'move' | 'clone'
 type ResourceDrawerMode = 'create' | 'edit' | 'clone' | 'inspect'
 
 type ResourceDrawerPanel = 'yaml' | 'diff' | 'audit'
-type WorkloadDetailTab = 'pods' | 'containers' | 'strategy' | 'metadata' | 'history'
+type WorkloadDetailTab = 'pods' | 'relations' | 'containers' | 'strategy' | 'metadata' | 'history'
 type PodLogStreamStatus = 'connecting' | 'live' | 'stopped' | 'error'
 type PodTerminalStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 
@@ -390,6 +396,7 @@ type GrafanaDashboardCreateResult = {
 const containerMenuKey = 'container-management'
 const registryMenuKey = 'registry-management'
 const observabilityMenuKey = 'observability-management'
+const permissionMenuKey = 'permission-management'
 
 const menuDefinitions: MenuItemDefinition[] = [
   {
@@ -454,7 +461,7 @@ const menuDefinitions: MenuItemDefinition[] = [
   },
   {
     key: 'roles',
-    label: '角色权限',
+    label: '角色管理',
     icon: <SafetyCertificateOutlined />,
     permission: 'roles:read',
   },
@@ -634,6 +641,7 @@ function Workspace() {
   const [resourceDrawerMode, setResourceDrawerMode] = useState<ResourceDrawerMode>('create')
   const [resourceDrawerPanel, setResourceDrawerPanel] =
     useState<ResourceDrawerPanel>('yaml')
+  const [siderCollapsed, setSiderCollapsed] = useState(false)
   const [resourceDraft, setResourceDraft] = useState('')
   const [resourceBaselineDraft, setResourceBaselineDraft] = useState('')
   const [editingResource, setEditingResource] = useState<K8sObject | null>(null)
@@ -642,6 +650,11 @@ function Workspace() {
   const [resourceDetailResource, setResourceDetailResource] = useState<K8sObject | null>(null)
   const [resourceDetailTab, setResourceDetailTab] = useState<WorkloadDetailTab>('pods')
   const [resourceDetailPodSearch, setResourceDetailPodSearch] = useState('')
+  const [resourceDetailRelations, setResourceDetailRelations] = useState<WorkloadRelations | null>(null)
+  const [resourceDetailRelationsLoading, setResourceDetailRelationsLoading] = useState(false)
+  const [resourceDetailHistory, setResourceDetailHistory] = useState<WorkloadHistory | null>(null)
+  const [resourceDetailHistoryLoading, setResourceDetailHistoryLoading] = useState(false)
+  const [resourceDetailRollbackRevision, setResourceDetailRollbackRevision] = useState<number | null>(null)
   const [workloadPods, setWorkloadPods] = useState<WorkloadPod[]>([])
   const [workloadPodsLoading, setWorkloadPodsLoading] = useState(false)
   const [podLogsViewer, setPodLogsViewer] = useState<PodLogViewer | null>(null)
@@ -653,6 +666,7 @@ function Workspace() {
   const [podLogsRevision, setPodLogsRevision] = useState(0)
   const [podTerminalWorkspace, setPodTerminalWorkspace] = useState<PodTerminalWorkspace | null>(null)
   const [podTerminalOpen, setPodTerminalOpen] = useState(false)
+  const [podTerminalModalReady, setPodTerminalModalReady] = useState(false)
   const [podTerminalStatus, setPodTerminalStatus] = useState<PodTerminalStatus>('disconnected')
   const [podTerminalError, setPodTerminalError] = useState('')
   const [podTerminalRevision, setPodTerminalRevision] = useState(0)
@@ -750,6 +764,13 @@ function Workspace() {
       label: item.label,
       icon: item.icon,
     }))
+  const permissionChildren = accessibleViews
+    .filter((item) => item.key === 'users' || item.key === 'roles')
+    .map((item) => ({
+      key: item.key,
+      label: item.label,
+      icon: item.icon,
+    }))
   const menuItems: MenuProps['items'] = [
     accessibleViews.find((item) => item.key === 'dashboard')
       ? {
@@ -782,18 +803,12 @@ function Workspace() {
           children: observabilityChildren,
         }
       : null,
-    accessibleViews.find((item) => item.key === 'users')
+    permissionChildren.length > 0
       ? {
-          key: 'users',
-          icon: <TeamOutlined />,
-          label: '用户管理',
-        }
-      : null,
-    accessibleViews.find((item) => item.key === 'roles')
-      ? {
-          key: 'roles',
+          key: permissionMenuKey,
           icon: <SafetyCertificateOutlined />,
-          label: '角色权限',
+          label: '权限中心',
+          children: permissionChildren,
         }
       : null,
   ].filter(Boolean)
@@ -834,6 +849,11 @@ function Workspace() {
       setResourceDetailOpen(false)
       setResourceDetailLoading(false)
       setResourceDetailResource(null)
+      setResourceDetailRelations(null)
+      setResourceDetailRelationsLoading(false)
+      setResourceDetailHistory(null)
+      setResourceDetailHistoryLoading(false)
+      setResourceDetailRollbackRevision(null)
     })
   }, [sessionToken])
 
@@ -1111,9 +1131,23 @@ function Workspace() {
     return workloadPods.filter((pod) =>
       [pod.name, pod.nodeName, pod.podIP, ...pod.containers]
         .filter(Boolean)
-        .some((value) => value.toLowerCase().includes(query)),
+      .some((value) => value.toLowerCase().includes(query)),
     )
   }, [resourceDetailPodSearch, workloadPods])
+  const relatedResourceCount = useMemo(
+    () =>
+      (resourceDetailRelations?.services.length ?? 0) +
+      (resourceDetailRelations?.ingresses.length ?? 0) +
+      (resourceDetailRelations?.networkPolicies.length ?? 0) +
+      (resourceDetailRelations?.persistentVolumeClaims.length ?? 0) +
+      (resourceDetailRelations?.persistentVolumes.length ?? 0),
+    [resourceDetailRelations],
+  )
+  const workloadHistoryItems = useMemo(
+    () => resourceDetailHistory?.items ?? [],
+    [resourceDetailHistory],
+  )
+  const podLogLines = useMemo(() => splitPodLogLines(podLogsContent), [podLogsContent])
 
   const hydrateWorkspaceEvent = useEffectEvent(
     async (client: ReturnType<typeof createApi>, token: string) => {
@@ -1160,6 +1194,56 @@ function Workspace() {
         handleError(error, '加载 Pod 列表失败')
       } finally {
         setWorkloadPodsLoading(false)
+      }
+    },
+  )
+
+  const refreshWorkloadRelationsEvent = useEffectEvent(
+    async (
+      client: ReturnType<typeof createApi>,
+      clusterId: number,
+      resourceType: string,
+      workloadName: string,
+      namespace: string,
+    ) => {
+      setResourceDetailRelationsLoading(true)
+      try {
+        const result = await client.get<WorkloadRelations>(
+          `/clusters/${clusterId}/workloads/${resourceType}/${workloadName}/relations?${new URLSearchParams({
+            namespace,
+          }).toString()}`,
+        )
+        setResourceDetailRelations(result)
+      } catch (error) {
+        setResourceDetailRelations(null)
+        handleError(error, '加载关联资源失败')
+      } finally {
+        setResourceDetailRelationsLoading(false)
+      }
+    },
+  )
+
+  const refreshWorkloadHistoryEvent = useEffectEvent(
+    async (
+      client: ReturnType<typeof createApi>,
+      clusterId: number,
+      resourceType: string,
+      workloadName: string,
+      namespace: string,
+    ) => {
+      setResourceDetailHistoryLoading(true)
+      try {
+        const result = await client.get<WorkloadHistory>(
+          `/clusters/${clusterId}/workloads/${resourceType}/${workloadName}/history?${new URLSearchParams({
+            namespace,
+          }).toString()}`,
+        )
+        setResourceDetailHistory(result)
+      } catch (error) {
+        setResourceDetailHistory(null)
+        handleError(error, '加载版本记录失败')
+      } finally {
+        setResourceDetailHistoryLoading(false)
       }
     },
   )
@@ -1299,6 +1383,84 @@ function Workspace() {
     resourceDetailResource,
     resourceDetailSupportsPodOps,
     selectedClusterId,
+      selectedResourceDefinition,
+  ])
+
+  useEffect(() => {
+    if (
+      !api ||
+      !canReadResources ||
+      !selectedClusterId ||
+      !resourceDetailOpen ||
+      !resourceDetailResource ||
+      !selectedResourceDefinition ||
+      !supportsWorkloadRelations(selectedResourceDefinition.key)
+    ) {
+      setResourceDetailRelations(null)
+      setResourceDetailRelationsLoading(false)
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      setResourceDetailRelations(null)
+      setResourceDetailRelationsLoading(false)
+      return
+    }
+
+    void refreshWorkloadRelationsEvent(
+      api,
+      selectedClusterId,
+      selectedResourceDefinition.key,
+      resourceName(resourceDetailResource),
+      namespace,
+    )
+  }, [
+    api,
+    canReadResources,
+    resourceDetailOpen,
+    resourceDetailResource,
+    selectedClusterId,
+      selectedResourceDefinition,
+  ])
+
+  useEffect(() => {
+    if (
+      !api ||
+      !canReadResources ||
+      !selectedClusterId ||
+      !resourceDetailOpen ||
+      !resourceDetailResource ||
+      !selectedResourceDefinition ||
+      !supportsWorkloadHistory(selectedResourceDefinition.key)
+    ) {
+      setResourceDetailHistory(null)
+      setResourceDetailHistoryLoading(false)
+      setResourceDetailRollbackRevision(null)
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      setResourceDetailHistory(null)
+      setResourceDetailHistoryLoading(false)
+      setResourceDetailRollbackRevision(null)
+      return
+    }
+
+    void refreshWorkloadHistoryEvent(
+      api,
+      selectedClusterId,
+      selectedResourceDefinition.key,
+      resourceName(resourceDetailResource),
+      namespace,
+    )
+  }, [
+    api,
+    canReadResources,
+    resourceDetailOpen,
+    resourceDetailResource,
+    selectedClusterId,
     selectedResourceDefinition,
   ])
 
@@ -1391,7 +1553,13 @@ function Workspace() {
   }, [podLogsOpen, podLogsRevision, podLogsViewer, selectedClusterId, sessionToken])
 
   useEffect(() => {
-    if (!podTerminalOpen || !podTerminalWorkspace || !selectedClusterId || !podTerminalHostRef.current) {
+    if (
+      !podTerminalOpen ||
+      !podTerminalModalReady ||
+      !podTerminalWorkspace ||
+      !selectedClusterId ||
+      !podTerminalHostRef.current
+    ) {
       podTerminalSocketRef.current?.close()
       podTerminalSocketRef.current = null
       podTerminalFitRef.current = null
@@ -1498,12 +1666,18 @@ function Workspace() {
     socket.onopen = () => {
       setPodTerminalStatus('connected')
       syncSize()
+      window.setTimeout(syncSize, 80)
     }
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data) as PodTerminalMessage
         if (message.type === 'output') {
-          terminal.write(message.data || '')
+          const payload = message.data || ''
+          if (message.stream === 'stderr') {
+            terminal.write(`\x1b[31m${payload}\x1b[0m`)
+          } else {
+            terminal.write(payload)
+          }
           return
         }
         if (message.type === 'status') {
@@ -1546,7 +1720,14 @@ function Workspace() {
         podTerminalFitRef.current = null
       }
     }
-  }, [podTerminalOpen, podTerminalRevision, podTerminalWorkspace, selectedClusterId, sessionToken])
+  }, [
+    podTerminalModalReady,
+    podTerminalOpen,
+    podTerminalRevision,
+    podTerminalWorkspace,
+    selectedClusterId,
+    sessionToken,
+  ])
 
   useEffect(() => {
     if (!canReadClusters || !selectedClusterId || !api || activeView !== 'inspection') {
@@ -1856,6 +2037,11 @@ function Workspace() {
       setResourceDetailOpen(false)
       setResourceDetailLoading(false)
       setResourceDetailResource(null)
+      setResourceDetailRelations(null)
+      setResourceDetailRelationsLoading(false)
+      setResourceDetailHistory(null)
+      setResourceDetailHistoryLoading(false)
+      setResourceDetailRollbackRevision(null)
       setWorkloadPods([])
       setPodLogsOpen(false)
       setPodTerminalOpen(false)
@@ -1866,6 +2052,11 @@ function Workspace() {
     setResourceDetailOpen(false)
     setResourceDetailLoading(false)
     setResourceDetailResource(null)
+    setResourceDetailRelations(null)
+    setResourceDetailRelationsLoading(false)
+    setResourceDetailHistory(null)
+    setResourceDetailHistoryLoading(false)
+    setResourceDetailRollbackRevision(null)
     setSelectedResourceKey('')
     setResourceDetailTab('pods')
     setResourceDetailPodSearch('')
@@ -1925,6 +2116,11 @@ function Workspace() {
     setResourceDetailOpen(false)
     setResourceDetailLoading(false)
     setResourceDetailResource(null)
+    setResourceDetailRelations(null)
+    setResourceDetailRelationsLoading(false)
+    setResourceDetailHistory(null)
+    setResourceDetailHistoryLoading(false)
+    setResourceDetailRollbackRevision(null)
     if (notify) {
       message.info('已退出当前会话')
     }
@@ -2190,6 +2386,15 @@ function Workspace() {
       setGrafanaCatalogSnapshot(data)
       return data
     } catch (error) {
+      setGrafanaCatalogCache((current) => {
+        const next = { ...current }
+        delete next[sourceId]
+        return next
+      })
+      if (selectedGrafanaSourceId === sourceId) {
+        setGrafanaCatalogSnapshot(null)
+        setSelectedGrafanaDashboard(null)
+      }
       handleError(error, '加载仪表盘目录失败')
       return null
     } finally {
@@ -3161,6 +3366,11 @@ function Workspace() {
     setResourceDetailLoading(true)
     setResourceDetailTab('pods')
     setResourceDetailPodSearch('')
+    setResourceDetailRelations(null)
+    setResourceDetailRelationsLoading(false)
+    setResourceDetailHistory(null)
+    setResourceDetailHistoryLoading(false)
+    setResourceDetailRollbackRevision(null)
 
     try {
       const query = buildNamespaceQuery(
@@ -3215,6 +3425,126 @@ function Workspace() {
       })
   }
 
+  function refreshResourceDetailRelations() {
+    if (
+      !api ||
+      !selectedClusterId ||
+      !selectedResourceDefinition ||
+      !resourceDetailResource ||
+      !supportsWorkloadRelations(selectedResourceDefinition.key)
+    ) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    setResourceDetailRelationsLoading(true)
+    void api
+      .get<WorkloadRelations>(
+        `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+          resourceDetailResource,
+        )}/relations?${new URLSearchParams({ namespace }).toString()}`,
+      )
+      .then((result) => {
+        setResourceDetailRelations(result)
+      })
+      .catch((error) => {
+        setResourceDetailRelations(null)
+        handleError(error, '刷新关联资源失败')
+      })
+      .finally(() => {
+        setResourceDetailRelationsLoading(false)
+      })
+  }
+
+  function refreshResourceDetailHistory() {
+    if (
+      !api ||
+      !selectedClusterId ||
+      !selectedResourceDefinition ||
+      !resourceDetailResource ||
+      !supportsWorkloadHistory(selectedResourceDefinition.key)
+    ) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    setResourceDetailHistoryLoading(true)
+    void api
+      .get<WorkloadHistory>(
+        `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+          resourceDetailResource,
+        )}/history?${new URLSearchParams({ namespace }).toString()}`,
+      )
+      .then((result) => {
+        setResourceDetailHistory(result)
+      })
+      .catch((error) => {
+        setResourceDetailHistory(null)
+        handleError(error, '刷新版本记录失败')
+      })
+      .finally(() => {
+        setResourceDetailHistoryLoading(false)
+      })
+  }
+
+  async function rollbackResourceDetailToRevision(item: WorkloadHistoryItem) {
+    if (
+      !api ||
+      !selectedClusterId ||
+      !selectedResourceDefinition ||
+      !resourceDetailResource ||
+      !canWriteResources
+    ) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    modal.confirm({
+      title: `回滚到 Revision ${item.revision}`,
+      content: `将对 ${resourceName(resourceDetailResource)} 执行 rollout rollback，回到所选历史版本。`,
+      okText: '确认回滚',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setResourceDetailRollbackRevision(item.revision)
+        try {
+          const result = await api.post<{ message?: string }>(
+            `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+              resourceDetailResource,
+            )}/rollback?${new URLSearchParams({ namespace }).toString()}`,
+            { revision: item.revision },
+          )
+          message.success(result?.message || `已回滚到 Revision ${item.revision}`)
+          refreshResourceDetailHistory()
+          refreshResourceDetailPods()
+          const query = buildNamespaceQuery(selectedResourceDefinition, namespace)
+          const detail = await api.get<K8sObject>(
+            `/clusters/${selectedClusterId}/resources/${selectedResourceDefinition.key}/${resourceName(
+              resourceDetailResource,
+            )}${query}`,
+          )
+          setResourceDetailResource(detail)
+        } catch (error) {
+          handleError(error, '回滚工作负载失败')
+        } finally {
+          setResourceDetailRollbackRevision(null)
+        }
+      },
+    })
+  }
+
   function openPodLogs(pod: WorkloadPod) {
     setPodLogsViewer({
       pod,
@@ -3236,6 +3566,7 @@ function Workspace() {
     setPodTerminalStatus('connecting')
     setPodTerminalUploadDir('/tmp')
     setPodTerminalDownloadPath('')
+    setPodTerminalModalReady(false)
     setPodTerminalOpen(true)
   }
 
@@ -3874,6 +4205,11 @@ function Workspace() {
     setResourceDetailResource(null)
     setResourceDetailTab('pods')
     setResourceDetailPodSearch('')
+    setResourceDetailRelations(null)
+    setResourceDetailRelationsLoading(false)
+    setResourceDetailHistory(null)
+    setResourceDetailHistoryLoading(false)
+    setResourceDetailRollbackRevision(null)
     setWorkloadPods([])
     setWorkloadPodsLoading(false)
     closePodLogsModal()
@@ -3897,6 +4233,7 @@ function Workspace() {
     podTerminalRef.current = null
     podTerminalFitRef.current = null
     setPodTerminalOpen(false)
+    setPodTerminalModalReady(false)
     setPodTerminalStatus('disconnected')
     setPodTerminalError('')
     setPodTerminalWorkspace(null)
@@ -4220,6 +4557,91 @@ function Workspace() {
           ) : null}
         </Space>
       ),
+    },
+  ]
+
+  const workloadRelationColumns: TableColumnsType<WorkloadRelatedResource> = [
+    {
+      title: '资源',
+      key: 'name',
+      render: (_, item) => (
+        <div className="entity-stack">
+          <span className="entity-primary">{item.name}</span>
+          <span className="entity-secondary">
+            {item.namespace ? `${item.kind} · ${item.namespace}` : item.kind}
+          </span>
+        </div>
+      ),
+    },
+    {
+      title: '状态 / 类型',
+      key: 'status',
+      render: (_, item) => item.status || '-',
+    },
+    {
+      title: '关联方式',
+      dataIndex: 'matchReason',
+      render: (value) => value || '-',
+    },
+    {
+      title: '摘要',
+      dataIndex: 'summary',
+      render: (value) => value || '-',
+    },
+  ]
+
+  const workloadHistoryColumns: TableColumnsType<WorkloadHistoryItem> = [
+    {
+      title: 'Revision',
+      key: 'revision',
+      render: (_, item) => (
+        <Space size={8}>
+          <strong>{`#${item.revision}`}</strong>
+          {item.current ? <Tag color="green">当前</Tag> : null}
+        </Space>
+      ),
+    },
+    {
+      title: '镜像',
+      key: 'images',
+      render: (_, item) =>
+        item.images && item.images.length > 0 ? (
+          <div className="entity-stack">
+            <span className="entity-primary">{item.images[0]}</span>
+            <span className="entity-secondary">
+              {item.images.length > 1 ? `+${item.images.length - 1} images` : item.summary || '-'}
+            </span>
+          </div>
+        ) : (
+          item.summary || '-'
+        ),
+    },
+    {
+      title: '变更原因',
+      dataIndex: 'changeCause',
+      render: (value) => value || '未记录',
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'createdAt',
+      render: (value) => formatDate(value),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      render: (_, item) =>
+        canWriteResources && resourceDetailHistory?.rollbackSupported ? (
+          <Button
+            size="small"
+            disabled={item.current}
+            loading={resourceDetailRollbackRevision === item.revision}
+            onClick={() => void rollbackResourceDetailToRevision(item)}
+          >
+            回滚
+          </Button>
+        ) : (
+          '-'
+        ),
     },
   ]
 
@@ -6103,95 +6525,128 @@ function Workspace() {
         </div>
       </section>
 
-      <section className="workspace-split">
-        <div className="soft-panel section-block">
-          <Table
-            rowKey="id"
-            columns={userColumns}
-            dataSource={filteredUsers}
-            pagination={{ pageSize: 8 }}
-            rowClassName={(record) => (record.id === selectedUserId ? 'is-selected-row' : '')}
-            onRow={(record) => ({
-              onClick: () => setSelectedUserId(record.id),
-            })}
-            locale={{ emptyText: <Empty description="没有符合条件的用户" /> }}
-          />
+      <section className="soft-panel section-block">
+        <Table
+          rowKey="id"
+          columns={userColumns}
+          dataSource={filteredUsers}
+          pagination={{ pageSize: 8 }}
+          rowClassName={(record) => (record.id === selectedUserId ? 'is-selected-row' : '')}
+          onRow={(record) => ({
+            onClick: () => setSelectedUserId(record.id),
+          })}
+          locale={{ emptyText: <Empty description="没有符合条件的用户" /> }}
+        />
+      </section>
+
+      <section className="soft-panel section-block access-detail-panel">
+        <div className="section-headline compact-headline">
+          <div>
+            <Typography.Title level={5}>用户概览</Typography.Title>
+            <Typography.Text type="secondary">
+              选中账号后，集中查看角色、权限和平台映射。
+            </Typography.Text>
+          </div>
         </div>
 
-        <aside className="soft-panel inspector-panel">
-          <div className="section-headline compact-headline">
-            <div>
-              <Typography.Title level={5}>用户透视</Typography.Title>
-              <Typography.Text type="secondary">
-                角色、权限和最近登录。
-              </Typography.Text>
+        {selectedUser ? (
+          <div className="access-detail-stack">
+            <div className="access-summary-grid">
+              <article className="access-summary-card access-summary-card-primary">
+                <span className="access-summary-label">账号</span>
+                <strong>{selectedUser.displayName}</strong>
+                <small>{selectedUser.username}</small>
+                <div className="access-summary-tag-row">
+                  <Tag color={selectedUser.active ? 'green' : 'default'}>
+                    {selectedUser.active ? '启用中' : '已停用'}
+                  </Tag>
+                </div>
+              </article>
+              <article className="access-summary-card">
+                <span className="access-summary-label">最近登录</span>
+                <strong>{formatDate(selectedUser.lastLoginAt)}</strong>
+                <small>最近一次进入平台的时间</small>
+              </article>
+              <article className="access-summary-card">
+                <span className="access-summary-label">角色数</span>
+                <strong>{selectedUser.roles.length}</strong>
+                <small>来自平台角色绑定</small>
+              </article>
+              <article className="access-summary-card">
+                <span className="access-summary-label">权限覆盖</span>
+                <strong>{selectedUser.permissions.length}</strong>
+                <small>当前可用的平台权限项</small>
+              </article>
+            </div>
+
+            <div className="access-detail-grid">
+              <section className="access-detail-section">
+                <div className="inspector-subtitle-row">
+                  <strong>绑定角色</strong>
+                  <span>{selectedUser.roles.length} 项</span>
+                </div>
+                <div className="tag-cloud">
+                  {selectedUser.roles.length > 0 ? (
+                    selectedUser.roles.map((role) => (
+                      <Tag
+                        key={role.id}
+                        className="tag-link"
+                        onClick={() => {
+                          setSelectedRoleId(role.id)
+                          setActiveView('roles')
+                        }}
+                      >
+                        {role.name}
+                      </Tag>
+                    ))
+                  ) : (
+                    <Typography.Text type="secondary">当前用户还没有绑定角色</Typography.Text>
+                  )}
+                </div>
+              </section>
+
+              <section className="access-detail-section">
+                <div className="inspector-subtitle-row">
+                  <strong>直接权限</strong>
+                  <span>{selectedUser.permissions.length} 项</span>
+                </div>
+                <div className="permission-pill-list">
+                  {selectedUser.permissions.length > 0 ? (
+                    selectedUser.permissions.map((permission) => (
+                      <span key={permission} className="permission-pill">
+                        {permission}
+                      </span>
+                    ))
+                  ) : (
+                    <Typography.Text type="secondary">当前用户尚未分配权限</Typography.Text>
+                  )}
+                </div>
+              </section>
+
+              <section className="access-detail-section access-detail-section-wide">
+                <Alert
+                  type="info"
+                  showIcon
+                  message="平台权限与集群凭据分层生效"
+                  description="能不能发起操作看平台角色，能不能执行成功看集群凭据。"
+                />
+
+                <div className="mapping-card-stack access-mapping-grid">
+                  {buildPermissionMappings(selectedUser.permissions).map((mapping) => (
+                    <section key={mapping.permission} className="mapping-card">
+                      <strong>{mapping.label}</strong>
+                      <span>{mapping.effect}</span>
+                      <small>{mapping.kubernetesScope}</small>
+                      <em>{mapping.note}</em>
+                    </section>
+                  ))}
+                </div>
+              </section>
             </div>
           </div>
-
-          {selectedUser ? (
-            <div className="inspector-stack">
-              <div className="identity-block">
-                <strong>{selectedUser.displayName}</strong>
-                <span>{selectedUser.username}</span>
-              </div>
-
-              <Descriptions column={1} size="small">
-                <Descriptions.Item label="状态">
-                  <Tag color={selectedUser.active ? 'green' : 'default'}>
-                    {selectedUser.active ? 'ACTIVE' : 'DISABLED'}
-                  </Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label="最近登录">
-                  {formatDate(selectedUser.lastLoginAt)}
-                </Descriptions.Item>
-                <Descriptions.Item label="角色数">
-                  {selectedUser.roles.length}
-                </Descriptions.Item>
-                <Descriptions.Item label="权限覆盖">
-                  {selectedUser.permissions.length}
-                </Descriptions.Item>
-              </Descriptions>
-
-              <div className="tag-cloud">
-                {selectedUser.roles.map((role) => (
-                  <Tag key={role.id}>{role.name}</Tag>
-                ))}
-              </div>
-
-              <div className="permission-pill-list">
-                {selectedUser.permissions.length > 0 ? (
-                  selectedUser.permissions.map((permission) => (
-                    <span key={permission} className="permission-pill">
-                      {permission}
-                    </span>
-                  ))
-                ) : (
-                  <Typography.Text type="secondary">当前用户尚未分配权限</Typography.Text>
-                )}
-              </div>
-
-              <Alert
-                type="info"
-                showIcon
-                message="平台权限与集群凭据分层生效"
-                description="能不能发起操作看平台角色，能不能执行成功看集群凭据。"
-              />
-
-              <div className="mapping-card-stack">
-                {buildPermissionMappings(selectedUser.permissions).map((mapping) => (
-                  <section key={mapping.permission} className="mapping-card">
-                    <strong>{mapping.label}</strong>
-                    <span>{mapping.effect}</span>
-                    <small>{mapping.kubernetesScope}</small>
-                    <em>{mapping.note}</em>
-                  </section>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <Empty description="选择一个用户查看详情" />
-          )}
-        </aside>
+        ) : (
+          <Empty description="选择一个用户查看概览" />
+        )}
       </section>
     </div>
   )
@@ -6201,7 +6656,7 @@ function Workspace() {
       <section className="soft-panel section-block">
         <div className="section-headline">
           <div>
-            <Typography.Title level={4}>角色与权限</Typography.Title>
+            <Typography.Title level={4}>角色目录</Typography.Title>
             <Typography.Text type="secondary">
               筛选角色，并查看权限分组与影响范围。
             </Typography.Text>
@@ -6252,99 +6707,133 @@ function Workspace() {
         </div>
       </section>
 
-      <section className="workspace-split">
-        <div className="soft-panel section-block">
-          <Table
-            rowKey="id"
-            columns={roleColumns}
-            dataSource={filteredRoles}
-            pagination={{ pageSize: 8 }}
-            rowClassName={(record) => (record.id === selectedRoleId ? 'is-selected-row' : '')}
-            onRow={(record) => ({
-              onClick: () => setSelectedRoleId(record.id),
-            })}
-            locale={{ emptyText: <Empty description="没有符合条件的角色" /> }}
-          />
+      <section className="soft-panel section-block">
+        <Table
+          rowKey="id"
+          columns={roleColumns}
+          dataSource={filteredRoles}
+          pagination={{ pageSize: 8 }}
+          rowClassName={(record) => (record.id === selectedRoleId ? 'is-selected-row' : '')}
+          onRow={(record) => ({
+            onClick: () => setSelectedRoleId(record.id),
+          })}
+          locale={{ emptyText: <Empty description="没有符合条件的角色" /> }}
+        />
+      </section>
+
+      <section className="soft-panel section-block access-detail-panel">
+        <div className="section-headline compact-headline">
+          <div>
+            <Typography.Title level={5}>角色概览</Typography.Title>
+            <Typography.Text type="secondary">
+              权限分组、关联用户和平台影响范围集中展示。
+            </Typography.Text>
+          </div>
         </div>
 
-        <aside className="soft-panel inspector-panel">
-          <div className="section-headline compact-headline">
-            <div>
-              <Typography.Title level={5}>角色透视</Typography.Title>
-              <Typography.Text type="secondary">
-                权限分组和关联用户一眼看清。
-              </Typography.Text>
+        {selectedRole ? (
+          <div className="access-detail-stack">
+            <div className="access-summary-grid">
+              <article className="access-summary-card access-summary-card-primary">
+                <span className="access-summary-label">角色</span>
+                <strong>{selectedRole.name}</strong>
+                <small>{selectedRole.description || '未填写角色说明'}</small>
+                <div className="access-summary-tag-row">
+                  <Tag color={selectedRole.builtIn ? 'geekblue' : 'default'}>
+                    {selectedRole.builtIn ? '内建角色' : '自定义角色'}
+                  </Tag>
+                </div>
+              </article>
+              <article className="access-summary-card">
+                <span className="access-summary-label">权限数</span>
+                <strong>{selectedRole.permissions.length}</strong>
+                <small>当前角色持有的平台权限项</small>
+              </article>
+              <article className="access-summary-card">
+                <span className="access-summary-label">关联用户</span>
+                <strong>{selectedRoleUsers.length}</strong>
+                <small>已绑定该角色的平台账号</small>
+              </article>
+              <article className="access-summary-card">
+                <span className="access-summary-label">最近更新</span>
+                <strong>{formatDate(selectedRole.updatedAt)}</strong>
+                <small>角色规则最后一次调整时间</small>
+              </article>
+            </div>
+
+            <div className="access-detail-grid">
+              <section className="access-detail-section">
+                <div className="inspector-subtitle-row">
+                  <strong>权限分组</strong>
+                  <span>{groupPermissions(selectedRole.permissions).length} 组</span>
+                </div>
+                <div className="permission-group-stack">
+                  {groupPermissions(selectedRole.permissions).map((group) => (
+                    <section key={group.key} className="permission-group-panel">
+                      <strong>{group.label}</strong>
+                      <div className="permission-pill-list">
+                        {group.permissions.map((permission) => (
+                          <span key={permission.key} className="permission-pill">
+                            {permission.key}
+                          </span>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              </section>
+
+              <section className="access-detail-section">
+                <div className="inspector-subtitle-row">
+                  <strong>绑定用户</strong>
+                  <span>{selectedRoleUsers.length} 人</span>
+                </div>
+                <div className="tag-cloud">
+                  {selectedRoleUsers.length > 0 ? (
+                    selectedRoleUsers.map((user) => (
+                      <Tag
+                        key={user.id}
+                        className="tag-link"
+                        onClick={() => {
+                          setSelectedUserId(user.id)
+                          setActiveView('users')
+                        }}
+                      >
+                        {user.displayName}
+                      </Tag>
+                    ))
+                  ) : (
+                    <Typography.Text type="secondary">当前还没有用户绑定这个角色</Typography.Text>
+                  )}
+                </div>
+              </section>
+
+              <section className="access-detail-section access-detail-section-wide">
+                <Alert
+                  type="info"
+                  showIcon
+                  message="平台角色不替代 Kubernetes RBAC"
+                  description="角色只决定平台入口，真正执行仍取决于集群凭据。"
+                />
+
+                <div className="mapping-card-stack access-mapping-grid">
+                  {buildPermissionMappings(selectedRole.permissions.map((permission) => permission.key)).map(
+                    (mapping) => (
+                      <section key={mapping.permission} className="mapping-card">
+                        <strong>{mapping.label}</strong>
+                        <span>{mapping.effect}</span>
+                        <small>{mapping.kubernetesScope}</small>
+                        <em>{mapping.note}</em>
+                      </section>
+                    ),
+                  )}
+                </div>
+              </section>
             </div>
           </div>
-
-          {selectedRole ? (
-            <div className="inspector-stack">
-              <div className="identity-block">
-                <strong>{selectedRole.name}</strong>
-                <span>{selectedRole.description || '未填写角色说明'}</span>
-              </div>
-
-              <Descriptions column={1} size="small">
-                <Descriptions.Item label="类型">
-                  <Tag color={selectedRole.builtIn ? 'geekblue' : 'default'}>
-                    {selectedRole.builtIn ? 'BUILT-IN' : 'CUSTOM'}
-                  </Tag>
-                </Descriptions.Item>
-                <Descriptions.Item label="权限数">
-                  {selectedRole.permissions.length}
-                </Descriptions.Item>
-                <Descriptions.Item label="关联用户">
-                  {selectedRoleUsers.length}
-                </Descriptions.Item>
-              </Descriptions>
-
-              <div className="permission-group-stack">
-                {groupPermissions(selectedRole.permissions).map((group) => (
-                  <section key={group.key} className="permission-group-panel">
-                    <strong>{group.label}</strong>
-                    <div className="permission-pill-list">
-                      {group.permissions.map((permission) => (
-                        <span key={permission.key} className="permission-pill">
-                          {permission.key}
-                        </span>
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </div>
-
-              <div className="tag-cloud">
-                {selectedRoleUsers.length > 0 ? (
-                  selectedRoleUsers.map((user) => <Tag key={user.id}>{user.displayName}</Tag>)
-                ) : (
-                  <Typography.Text type="secondary">当前还没有用户绑定这个角色</Typography.Text>
-                )}
-              </div>
-
-              <Alert
-                type="info"
-                showIcon
-                message="平台角色不替代 Kubernetes RBAC"
-                description="角色只决定平台入口，真正执行仍取决于集群凭据。"
-              />
-
-              <div className="mapping-card-stack">
-                {buildPermissionMappings(selectedRole.permissions.map((permission) => permission.key)).map(
-                  (mapping) => (
-                    <section key={mapping.permission} className="mapping-card">
-                      <strong>{mapping.label}</strong>
-                      <span>{mapping.effect}</span>
-                      <small>{mapping.kubernetesScope}</small>
-                      <em>{mapping.note}</em>
-                    </section>
-                  ),
-                )}
-              </div>
-            </div>
-          ) : (
-            <Empty description="选择一个角色查看详情" />
-          )}
-        </aside>
+        ) : (
+          <Empty description="选择一个角色查看概览" />
+        )}
       </section>
     </div>
   )
@@ -6380,25 +6869,46 @@ function Workspace() {
 
   return (
     <Layout className="shell">
-      <Layout.Sider width={264} theme="dark" className="shell-sider">
+      <Layout.Sider
+        width={264}
+        collapsedWidth={84}
+        collapsible
+        collapsed={siderCollapsed}
+        trigger={null}
+        theme="dark"
+        className={`shell-sider${siderCollapsed ? ' is-collapsed' : ''}`}
+      >
         <div className="brand-block">
-          <div className="brand-mark">
-            <img src={platformMarkSrc} alt="平台图标" className="brand-mark-image" />
+          <div className="brand-block-main">
+            <div className="brand-mark">
+              <img src={platformMarkSrc} alt="平台图标" className="brand-mark-image" />
+            </div>
+            {siderCollapsed ? null : (
+              <div>
+                <div className="brand-title">KubeFeel</div>
+              </div>
+            )}
           </div>
-          <div>
-            <div className="brand-title">KubeFeel</div>
-          </div>
+          <Button
+            type="text"
+            className="sider-toggle"
+            icon={siderCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+            onClick={() => setSiderCollapsed((current) => !current)}
+            aria-label={siderCollapsed ? '展开菜单' : '收起菜单'}
+          />
         </div>
 
         <div className="sider-section">
-          <div className="sider-label">Workspace</div>
+          {siderCollapsed ? null : <div className="sider-label">Workspace</div>}
           <Menu
             theme="dark"
             mode="inline"
+            inlineCollapsed={siderCollapsed}
             defaultOpenKeys={[
               ...(containerChildren.length > 0 ? [containerMenuKey] : []),
               ...(registryChildren.length > 0 ? [registryMenuKey] : []),
               ...(observabilityChildren.length > 0 ? [observabilityMenuKey] : []),
+              ...(permissionChildren.length > 0 ? [permissionMenuKey] : []),
             ]}
             selectedKeys={[activeView]}
             items={menuItems}
@@ -6415,12 +6925,21 @@ function Workspace() {
         </div>
 
         <div className="sider-footer">
-          <div className="user-chip">
-            <div className="user-chip-meta">
-              <span className="user-chip-name">{session.user.displayName}</span>
-              <span className="user-chip-sub">{session.user.username}</span>
-            </div>
-            <Badge status="processing" text="RBAC Online" />
+          <div className={`user-chip${siderCollapsed ? ' is-compact' : ''}`}>
+            {siderCollapsed ? (
+              <div className="user-chip-compact">
+                <TeamOutlined />
+                <Badge status="processing" />
+              </div>
+            ) : (
+              <>
+                <div className="user-chip-meta">
+                  <span className="user-chip-name">{session.user.displayName}</span>
+                  <span className="user-chip-sub">{session.user.username}</span>
+                </div>
+                <Badge status="processing" text="RBAC Online" />
+              </>
+            )}
           </div>
         </div>
       </Layout.Sider>
@@ -7874,6 +8393,151 @@ function Workspace() {
                     ),
                   },
                   {
+                    key: 'relations',
+                    label: '关联资源',
+                    children: (
+                      <div className="workload-tab-shell">
+                        <div className="workload-tab-toolbar">
+                          <div className="resource-relation-summary">
+                            <Tag color="blue">
+                              {`服务发现 ${
+                                (resourceDetailRelations?.services.length ?? 0) +
+                                (resourceDetailRelations?.ingresses.length ?? 0)
+                              }`}
+                            </Tag>
+                            <Tag color="gold">{`网络策略 ${resourceDetailRelations?.networkPolicies.length ?? 0}`}</Tag>
+                            <Tag color="green">
+                              {`存储卷 ${
+                                (resourceDetailRelations?.persistentVolumeClaims.length ?? 0) +
+                                (resourceDetailRelations?.persistentVolumes.length ?? 0)
+                              }`}
+                            </Tag>
+                            <Typography.Text type="secondary">
+                              {`共 ${relatedResourceCount} 项`}
+                            </Typography.Text>
+                          </div>
+                          <Button icon={<ReloadOutlined />} onClick={refreshResourceDetailRelations}>
+                            刷新关联
+                          </Button>
+                        </div>
+
+                        {resourceDetailRelationsLoading ? (
+                          <div className="resource-detail-placeholder">
+                            <Spin size="small" />
+                            <Typography.Text type="secondary">正在分析关联资源</Typography.Text>
+                          </div>
+                        ) : relatedResourceCount > 0 && resourceDetailRelations ? (
+                          <div className="workload-relation-grid">
+                            <section className="workload-relation-panel">
+                              <div className="inspector-subtitle-row">
+                                <strong>服务发现</strong>
+                                <span>{`Service ${resourceDetailRelations.services.length} · Ingress ${resourceDetailRelations.ingresses.length}`}</span>
+                              </div>
+                              <div className="workload-relation-stack">
+                                <div className="workload-relation-section">
+                                  <div className="workload-relation-section-head">
+                                    <strong>Services</strong>
+                                  </div>
+                                  {resourceDetailRelations.services.length > 0 ? (
+                                    <Table<WorkloadRelatedResource>
+                                      rowKey={(item) => `${item.resourceType}:${item.namespace || 'cluster'}:${item.name}`}
+                                      columns={workloadRelationColumns}
+                                      dataSource={resourceDetailRelations.services}
+                                      pagination={false}
+                                      size="small"
+                                    />
+                                  ) : (
+                                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载未匹配到 Service" />
+                                  )}
+                                </div>
+                                <div className="workload-relation-section">
+                                  <div className="workload-relation-section-head">
+                                    <strong>Ingresses</strong>
+                                  </div>
+                                  {resourceDetailRelations.ingresses.length > 0 ? (
+                                    <Table<WorkloadRelatedResource>
+                                      rowKey={(item) => `${item.resourceType}:${item.namespace || 'cluster'}:${item.name}`}
+                                      columns={workloadRelationColumns}
+                                      dataSource={resourceDetailRelations.ingresses}
+                                      pagination={false}
+                                      size="small"
+                                    />
+                                  ) : (
+                                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载未发现入口路由" />
+                                  )}
+                                </div>
+                              </div>
+                            </section>
+
+                            <section className="workload-relation-panel">
+                              <div className="inspector-subtitle-row">
+                                <strong>网络策略</strong>
+                                <span>{`${resourceDetailRelations.networkPolicies.length} 项`}</span>
+                              </div>
+                              {resourceDetailRelations.networkPolicies.length > 0 ? (
+                                <Table<WorkloadRelatedResource>
+                                  rowKey={(item) => `${item.resourceType}:${item.namespace || 'cluster'}:${item.name}`}
+                                  columns={workloadRelationColumns}
+                                  dataSource={resourceDetailRelations.networkPolicies}
+                                  pagination={false}
+                                  size="small"
+                                />
+                              ) : (
+                                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载未匹配到 NetworkPolicy" />
+                              )}
+                            </section>
+
+                            <section className="workload-relation-panel">
+                              <div className="inspector-subtitle-row">
+                                <strong>存储卷</strong>
+                                <span>{`PVC ${resourceDetailRelations.persistentVolumeClaims.length} · PV ${resourceDetailRelations.persistentVolumes.length}`}</span>
+                              </div>
+                              <div className="workload-relation-stack">
+                                <div className="workload-relation-section">
+                                  <div className="workload-relation-section-head">
+                                    <strong>PersistentVolumeClaims</strong>
+                                  </div>
+                                  {resourceDetailRelations.persistentVolumeClaims.length > 0 ? (
+                                    <Table<WorkloadRelatedResource>
+                                      rowKey={(item) => `${item.resourceType}:${item.namespace || 'cluster'}:${item.name}`}
+                                      columns={workloadRelationColumns}
+                                      dataSource={resourceDetailRelations.persistentVolumeClaims}
+                                      pagination={false}
+                                      size="small"
+                                    />
+                                  ) : (
+                                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载未引用 PVC" />
+                                  )}
+                                </div>
+                                <div className="workload-relation-section">
+                                  <div className="workload-relation-section-head">
+                                    <strong>PersistentVolumes</strong>
+                                  </div>
+                                  {resourceDetailRelations.persistentVolumes.length > 0 ? (
+                                    <Table<WorkloadRelatedResource>
+                                      rowKey={(item) => `${item.resourceType}:${item.namespace || 'cluster'}:${item.name}`}
+                                      columns={workloadRelationColumns}
+                                      dataSource={resourceDetailRelations.persistentVolumes}
+                                      pagination={false}
+                                      size="small"
+                                    />
+                                  ) : (
+                                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载未绑定 PV" />
+                                  )}
+                                </div>
+                              </div>
+                            </section>
+                          </div>
+                        ) : (
+                          <Empty
+                            image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            description="当前工作负载暂未匹配到服务发现、网络策略或存储卷资源"
+                          />
+                        )}
+                      </div>
+                    ),
+                  },
+                  {
                     key: 'strategy',
                     label: '调度策略',
                     children: (
@@ -7985,65 +8649,38 @@ function Workspace() {
                     label: '版本记录',
                     children: (
                       <div className="workload-history-shell">
-                        <div className="audit-mini-grid">
-                          <div className="audit-mini-card">
-                            <span>资源版本</span>
-                            <strong>{resourceDetailResource.metadata?.resourceVersion || '-'}</strong>
+                        <div className="workload-tab-toolbar">
+                          <div className="resource-relation-summary">
+                            <Tag color="blue">{`历史版本 ${workloadHistoryItems.length}`}</Tag>
+                            <Typography.Text type="secondary">最多显示近 6 条 revision，支持直接回滚</Typography.Text>
                           </div>
-                          <div className="audit-mini-card">
-                            <span>Generation</span>
-                            <strong>{resourceDetailResource.metadata?.generation ?? '-'}</strong>
-                          </div>
-                          <div className="audit-mini-card">
-                            <span>Revision</span>
-                            <strong>{resourceDetailDeploymentInsight?.revision || '-'}</strong>
-                          </div>
-                        </div>
-                        <div className="audit-mini-grid">
-                          <div className="audit-mini-card">
-                            <span>Managed Fields</span>
-                            <strong>{resourceDetailResource.metadata?.managedFields?.length ?? 0}</strong>
-                          </div>
-                          <div className="audit-mini-card">
-                            <span>UID</span>
-                            <strong>{resourceDetailResource.metadata?.uid || '-'}</strong>
-                          </div>
-                          <div className="audit-mini-card">
-                            <span>创建时间</span>
-                            <strong>{formatDate(resourceDetailResource.metadata?.creationTimestamp)}</strong>
-                          </div>
+                          {supportsWorkloadHistory(selectedResourceDefinition?.key) ? (
+                            <Button icon={<ReloadOutlined />} onClick={refreshResourceDetailHistory}>
+                              刷新版本
+                            </Button>
+                          ) : null}
                         </div>
 
-                        {resourceDetailDeploymentInsight ? (
-                          <section className="inspector-subsection">
-                            <div className="inspector-subtitle-row">
-                              <strong>Conditions</strong>
-                              <span>{resourceDetailDeploymentInsight.conditions.length}</span>
-                            </div>
-                            <div className="deployment-condition-list">
-                              {resourceDetailDeploymentInsight.conditions.length > 0 ? (
-                                resourceDetailDeploymentInsight.conditions.map((condition) => (
-                                  <article
-                                    key={`${condition.type}-${condition.reason}-${condition.lastUpdateTime || 'na'}`}
-                                    className="deployment-condition-card"
-                                  >
-                                    <div className="deployment-condition-head">
-                                      <strong>{condition.type}</strong>
-                                      <Tag color={deploymentConditionTagColor(condition.status)}>
-                                        {condition.status || 'Unknown'}
-                                      </Tag>
-                                    </div>
-                                    <span>{condition.reason || '未提供 reason'}</span>
-                                    <p>{condition.message || '当前 condition 未提供详细信息。'}</p>
-                                    <em>{formatDate(condition.lastUpdateTime)}</em>
-                                  </article>
-                                ))
-                              ) : (
-                                <Typography.Text type="secondary">当前工作负载没有 condition 信息</Typography.Text>
-                              )}
-                            </div>
-                          </section>
-                        ) : null}
+                        {resourceDetailHistoryLoading ? (
+                          <div className="resource-detail-placeholder">
+                            <Spin size="small" />
+                            <Typography.Text type="secondary">正在加载历史版本</Typography.Text>
+                          </div>
+                        ) : supportsWorkloadHistory(selectedResourceDefinition?.key) ? (
+                          workloadHistoryItems.length > 0 ? (
+                            <Table<WorkloadHistoryItem>
+                              rowKey={(item) => `${item.name}:${item.revision}`}
+                              columns={workloadHistoryColumns}
+                              dataSource={workloadHistoryItems}
+                              pagination={false}
+                              size="small"
+                            />
+                          ) : (
+                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载暂未生成可用的 rollout 历史版本" />
+                          )
+                        ) : (
+                          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载类型暂不支持版本记录和 rollout 回滚" />
+                        )}
                       </div>
                     ),
                   },
@@ -8282,6 +8919,7 @@ function Workspace() {
         title={podLogsViewer ? `实时日志 · ${podLogsViewer.pod.name}` : '实时日志'}
         open={podLogsOpen}
         onCancel={closePodLogsModal}
+        zIndex={1400}
         footer={
           <Space>
             <Button onClick={() => setPodLogsRevision((current) => current + 1)}>重新连接</Button>
@@ -8299,7 +8937,7 @@ function Workspace() {
               <Tag color={podLogStatusColor(podLogsStatus)}>{podLogStatusLabel(podLogsStatus)}</Tag>
               {podLogsViewer ? (
                 <Typography.Text type="secondary">
-                  {`${podLogsViewer.pod.namespace} / ${podLogsViewer.pod.name}`}
+                  {`${podLogsViewer.pod.namespace} / ${podLogsViewer.container || podLogsViewer.pod.containers[0] || 'default'}`}
                 </Typography.Text>
               ) : null}
             </div>
@@ -8334,12 +8972,24 @@ function Workspace() {
           </div>
           {podLogsError ? <Alert type="error" showIcon message={podLogsError} /> : null}
           <div className="pod-ops-output pod-logs-live-output" ref={podLogsOutputRef}>
-            <pre>
-              {podLogsContent ||
-                (podLogsStatus === 'connecting'
+            {podLogsContent ? (
+              <div className="pod-logs-live-content">
+                {podLogLines.map((line, index) => (
+                  <div
+                    key={`${index}-${line.content}`}
+                    className={`pod-log-line pod-log-line-${classifyPodLogLine(line.content)}`}
+                  >
+                    {line.content || ' '}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <pre>
+                {podLogsStatus === 'connecting'
                   ? '正在连接日志流...'
-                  : '当前容器暂无日志输出。')}
-            </pre>
+                  : '当前容器暂无日志输出。'}
+              </pre>
+            )}
           </div>
         </div>
       </Modal>
@@ -8348,6 +8998,9 @@ function Workspace() {
         title={podTerminalWorkspace ? `交互终端 · ${podTerminalWorkspace.pod.name}` : '交互终端'}
         open={podTerminalOpen}
         onCancel={closePodTerminalModal}
+        zIndex={1400}
+        afterOpenChange={setPodTerminalModalReady}
+        forceRender
         footer={null}
         width={1040}
         className="pod-workbench-modal pod-terminal-modal"
@@ -8355,14 +9008,13 @@ function Workspace() {
         <div className="pod-terminal-shell">
           <div className="pod-terminal-toolbar">
             <div className="pod-terminal-meta">
-              <strong>{podTerminalWorkspace?.pod.name || 'Pod Terminal'}</strong>
               <Space size={10} wrap>
                 <Tag color={podTerminalStatusColor(podTerminalStatus)}>
                   {podTerminalStatusLabel(podTerminalStatus)}
                 </Tag>
                 {podTerminalWorkspace ? (
                   <Typography.Text type="secondary">
-                    {`${podTerminalWorkspace.pod.namespace} / ${podTerminalWorkspace.pod.nodeName || 'Pending Node'}`}
+                    {`${podTerminalWorkspace.pod.namespace} / ${podTerminalWorkspace.container || podTerminalWorkspace.pod.containers[0] || 'default'} / ${podTerminalWorkspace.pod.nodeName || 'Pending Node'}`}
                   </Typography.Text>
                 ) : null}
               </Space>
@@ -8823,7 +9475,7 @@ function viewTitle(view: ViewKey) {
     case 'users':
       return '用户管理'
     case 'roles':
-      return '角色权限'
+      return '角色管理'
     default:
       return 'KubeFeel'
   }
@@ -9965,6 +10617,14 @@ function supportsPodOperations(resourceType?: string | null) {
   )
 }
 
+function supportsWorkloadRelations(resourceType?: string | null) {
+  return supportsPodOperations(resourceType)
+}
+
+function supportsWorkloadHistory(resourceType?: string | null) {
+  return ['deployment', 'statefulset', 'daemonset'].includes(resourceType || '')
+}
+
 function podPhaseLabel(phase?: string | null) {
   switch (phase) {
     case 'Running':
@@ -10021,6 +10681,33 @@ function podLogStatusColor(status: PodLogStreamStatus) {
     default:
       return 'default'
   }
+}
+
+function splitPodLogLines(content: string) {
+  return content.split(/\r?\n/).map((line) => ({ content: line }))
+}
+
+function classifyPodLogLine(content: string) {
+  const text = content.trim().toLowerCase()
+  if (!text) {
+    return 'default'
+  }
+
+  if (
+    /\b(error|fatal|panic|exception|traceback|failed|fail|denied|refused|unauthorized)\b/i.test(
+      text,
+    )
+  ) {
+    return 'error'
+  }
+  if (/\b(warn|warning|deprecated|retry|backoff)\b/i.test(text)) {
+    return 'warn'
+  }
+  if (/\b(info|started|connected|listening|ready|ok)\b/i.test(text)) {
+    return 'info'
+  }
+
+  return 'default'
 }
 
 function podTerminalStatusLabel(status: PodTerminalStatus) {
@@ -10894,7 +11581,7 @@ function groupPermissions(permissionList: Permission[]): PermissionGroup[] {
     { key: 'registries', label: '镜像仓库' },
     { key: 'observability', label: '可观测性' },
     { key: 'users', label: '用户管理' },
-    { key: 'roles', label: '角色权限' },
+    { key: 'roles', label: '角色管理' },
   ]
 
   return definitions

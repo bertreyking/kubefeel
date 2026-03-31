@@ -2,8 +2,6 @@
 
 KubeFeel 是一个面向企业场景的 Kubernetes 多集群管理平台，聚焦在统一接入、资源操作、集群巡检、镜像仓库集成与可观测性入口。
 
-![KubeFeel 集群列表](docs/images/cluster-list.png)
-
 ## 功能概览
 
 - 多集群接入与管理

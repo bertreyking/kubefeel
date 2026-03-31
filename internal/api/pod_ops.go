@@ -23,6 +23,10 @@ type podExecPayload struct {
 	Command   string `json:"command"`
 }
 
+type workloadRollbackPayload struct {
+	Revision int64 `json:"revision"`
+}
+
 var terminalUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -42,6 +46,70 @@ func (s *Server) listWorkloadPods(c *gin.Context) {
 	}
 
 	respondData(c, http.StatusOK, items)
+}
+
+func (s *Server) listWorkloadRelations(c *gin.Context) {
+	_, runtime, namespace, resourceType, resourceName, ok := s.loadPodOperationContext(c)
+	if !ok {
+		return
+	}
+
+	items, err := kube.ListWorkloadRelations(c.Request.Context(), runtime, resourceType, namespace, resourceName)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	respondData(c, http.StatusOK, items)
+}
+
+func (s *Server) getWorkloadHistory(c *gin.Context) {
+	_, runtime, namespace, resourceType, resourceName, ok := s.loadPodOperationContext(c)
+	if !ok {
+		return
+	}
+
+	items, err := kube.ListWorkloadHistory(c.Request.Context(), runtime, resourceType, namespace, resourceName)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	respondData(c, http.StatusOK, items)
+}
+
+func (s *Server) rollbackWorkload(c *gin.Context) {
+	_, runtime, namespace, resourceType, resourceName, ok := s.loadPodOperationContext(c)
+	if !ok {
+		return
+	}
+
+	var input workloadRollbackPayload
+	if err := c.ShouldBindJSON(&input); err != nil || input.Revision <= 0 {
+		respondError(c, http.StatusBadRequest, "revision is required")
+		return
+	}
+
+	message, err := kube.RollbackWorkload(
+		c.Request.Context(),
+		runtime,
+		resourceType,
+		namespace,
+		resourceName,
+		input.Revision,
+	)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	respondData(c, http.StatusOK, gin.H{
+		"resourceType": resourceType,
+		"name":         resourceName,
+		"namespace":    namespace,
+		"revision":     input.Revision,
+		"message":      message,
+	})
 }
 
 func (s *Server) getPodLogs(c *gin.Context) {

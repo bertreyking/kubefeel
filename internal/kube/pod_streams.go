@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 
@@ -23,6 +24,13 @@ type TerminalMessage struct {
 	Error  string `json:"error,omitempty"`
 	Cols   uint16 `json:"cols,omitempty"`
 	Rows   uint16 `json:"rows,omitempty"`
+}
+
+type containerShellCandidate struct {
+	label       string
+	probe       []string
+	interactive []string
+	command     []string
 }
 
 func StreamPodLogs(
@@ -99,6 +107,10 @@ func UploadPodFile(
 	}
 	targetDir = path.Clean(targetDir)
 	targetPath := path.Join(targetDir, path.Base(fileName))
+	shell, err := resolveContainerShell(ctx, runtime, namespace, podName, container)
+	if err != nil {
+		return fmt.Errorf("当前容器不支持文件上传: %w", err)
+	}
 
 	_, stderr, err := streamExecCommand(
 		ctx,
@@ -106,7 +118,7 @@ func UploadPodFile(
 		namespace,
 		podName,
 		container,
-		[]string{"sh", "-lc", fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(targetDir), shellQuote(targetPath))},
+		shell.commandLine(fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(targetDir), shellQuote(targetPath))),
 		content,
 		io.Discard,
 		false,
@@ -131,6 +143,10 @@ func DownloadPodFile(
 	if trimmedPath == "" {
 		return nil, fmt.Errorf("path is required")
 	}
+	shell, err := resolveContainerShell(ctx, runtime, namespace, podName, container)
+	if err != nil {
+		return nil, fmt.Errorf("当前容器不支持文件下载: %w", err)
+	}
 
 	var stdout bytes.Buffer
 	_, stderr, err := streamExecCommand(
@@ -139,7 +155,7 @@ func DownloadPodFile(
 		namespace,
 		podName,
 		container,
-		[]string{"sh", "-lc", fmt.Sprintf("cat %s", shellQuote(path.Clean(trimmedPath)))},
+		shell.commandLine(fmt.Sprintf("cat %s", shellQuote(path.Clean(trimmedPath)))),
 		nil,
 		&stdout,
 		false,
@@ -161,10 +177,9 @@ func StreamPodTerminal(
 	namespace, podName, container string,
 	messenger TerminalMessenger,
 ) error {
-	command := []string{
-		"sh",
-		"-c",
-		"if [ -x /bin/bash ]; then exec /bin/bash -il; elif [ -x /bin/sh ]; then exec /bin/sh -il; else exec sh; fi",
+	shell, err := resolveContainerShell(ctx, runtime, namespace, podName, container)
+	if err != nil {
+		return err
 	}
 
 	stdinReader, stdinWriter := io.Pipe()
@@ -203,7 +218,7 @@ func StreamPodTerminal(
 		namespace,
 		podName,
 		container,
-		command,
+		shell.interactive,
 		stdinReader,
 		stdoutWriter,
 		true,
@@ -225,6 +240,134 @@ func StreamPodTerminal(
 	}
 
 	return nil
+}
+
+func availableContainerShellCandidates() []containerShellCandidate {
+	return []containerShellCandidate{
+		{
+			label:       "/bin/sh",
+			probe:       []string{"/bin/sh", "-c", "exit 0"},
+			interactive: []string{"/bin/sh", "-i"},
+			command:     []string{"/bin/sh", "-c"},
+		},
+		{
+			label:       "/bin/bash",
+			probe:       []string{"/bin/bash", "-c", "exit 0"},
+			interactive: []string{"/bin/bash", "-i"},
+			command:     []string{"/bin/bash", "-c"},
+		},
+		{
+			label:       "/bin/ash",
+			probe:       []string{"/bin/ash", "-c", "exit 0"},
+			interactive: []string{"/bin/ash", "-i"},
+			command:     []string{"/bin/ash", "-c"},
+		},
+		{
+			label:       "/bin/dash",
+			probe:       []string{"/bin/dash", "-c", "exit 0"},
+			interactive: []string{"/bin/dash", "-i"},
+			command:     []string{"/bin/dash", "-c"},
+		},
+		{
+			label:       "/bin/zsh",
+			probe:       []string{"/bin/zsh", "-c", "exit 0"},
+			interactive: []string{"/bin/zsh", "-i"},
+			command:     []string{"/bin/zsh", "-c"},
+		},
+		{
+			label:       "sh",
+			probe:       []string{"sh", "-c", "exit 0"},
+			interactive: []string{"sh", "-i"},
+			command:     []string{"sh", "-c"},
+		},
+		{
+			label:       "bash",
+			probe:       []string{"bash", "-c", "exit 0"},
+			interactive: []string{"bash", "-i"},
+			command:     []string{"bash", "-c"},
+		},
+		{
+			label:       "ash",
+			probe:       []string{"ash", "-c", "exit 0"},
+			interactive: []string{"ash", "-i"},
+			command:     []string{"ash", "-c"},
+		},
+		{
+			label:       "dash",
+			probe:       []string{"dash", "-c", "exit 0"},
+			interactive: []string{"dash", "-i"},
+			command:     []string{"dash", "-c"},
+		},
+		{
+			label:       "zsh",
+			probe:       []string{"zsh", "-c", "exit 0"},
+			interactive: []string{"zsh", "-i"},
+			command:     []string{"zsh", "-c"},
+		},
+		{
+			label:       "busybox sh",
+			probe:       []string{"busybox", "sh", "-c", "exit 0"},
+			interactive: []string{"busybox", "sh", "-i"},
+			command:     []string{"busybox", "sh", "-c"},
+		},
+	}
+}
+
+func (candidate containerShellCandidate) commandLine(command string) []string {
+	next := slices.Clone(candidate.command)
+	next = append(next, command)
+	return next
+}
+
+func resolveContainerShell(
+	ctx context.Context,
+	runtime *Runtime,
+	namespace, podName, container string,
+) (containerShellCandidate, error) {
+	candidates := availableContainerShellCandidates()
+	attempted := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		_, stderr, err := streamExecCommand(
+			ctx,
+			runtime,
+			namespace,
+			podName,
+			container,
+			candidate.probe,
+			nil,
+			io.Discard,
+			false,
+			nil,
+		)
+		if err == nil {
+			return candidate, nil
+		}
+
+		detail := strings.TrimSpace(strings.Join([]string{stderr, err.Error()}, " "))
+		if isContainerShellMissingError(detail) {
+			attempted = append(attempted, candidate.label)
+			continue
+		}
+
+		return containerShellCandidate{}, err
+	}
+
+	return containerShellCandidate{}, fmt.Errorf(
+		"容器内未发现可用 shell（已尝试 %s）。如果这是 distroless 或 scratch 镜像，请改用 Logs，或直接执行容器内已知二进制；需要交互排障时，建议注入临时调试容器",
+		strings.Join(attempted, "、"),
+	)
+}
+
+func isContainerShellMissingError(detail string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(detail))
+	if lowered == "" {
+		return false
+	}
+
+	return strings.Contains(lowered, "executable file not found") ||
+		strings.Contains(lowered, "no such file or directory") ||
+		strings.Contains(lowered, "not found") ||
+		strings.Contains(lowered, "stat /bin/")
 }
 
 type TerminalMessenger interface {

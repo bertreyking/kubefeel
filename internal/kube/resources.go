@@ -21,6 +21,7 @@ var resourceCatalog = []ResourceDefinition{
 	{Key: "secret", Label: "Secrets", Kind: "Secret", APIVersion: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "secrets"}},
 	{Key: "service", Label: "Services", Kind: "Service", APIVersion: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "services"}},
 	{Key: "ingress", Label: "Ingresses", Kind: "Ingress", APIVersion: "networking.k8s.io/v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"}},
+	{Key: "networkpolicy", Label: "NetworkPolicies", Kind: "NetworkPolicy", APIVersion: "networking.k8s.io/v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}},
 	{Key: "ingressclass", Label: "IngressClasses", Kind: "IngressClass", APIVersion: "networking.k8s.io/v1", Namespaced: false, GVR: schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingressclasses"}},
 	{Key: "pvc", Label: "PersistentVolumeClaims", Kind: "PersistentVolumeClaim", APIVersion: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}},
 	{Key: "pv", Label: "PersistentVolumes", Kind: "PersistentVolume", APIVersion: "v1", Namespaced: false, GVR: schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumes"}},

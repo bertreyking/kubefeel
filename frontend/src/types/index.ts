@@ -411,6 +411,41 @@ export type WorkloadPod = {
   createdAt: string
 }
 
+export type WorkloadRelatedResource = {
+  resourceType: string
+  kind: string
+  name: string
+  namespace?: string
+  status?: string
+  matchReason: string
+  summary?: string
+}
+
+export type WorkloadRelations = {
+  services: WorkloadRelatedResource[]
+  ingresses: WorkloadRelatedResource[]
+  networkPolicies: WorkloadRelatedResource[]
+  persistentVolumeClaims: WorkloadRelatedResource[]
+  persistentVolumes: WorkloadRelatedResource[]
+}
+
+export type WorkloadHistoryItem = {
+  revision: number
+  name: string
+  createdAt?: string
+  current: boolean
+  changeCause?: string
+  images?: string[]
+  summary?: string
+}
+
+export type WorkloadHistory = {
+  supported: boolean
+  rollbackSupported: boolean
+  resourceType: string
+  items: WorkloadHistoryItem[]
+}
+
 export type PodLogsResult = {
   pod: string
   namespace: string
