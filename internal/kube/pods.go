@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -35,7 +36,7 @@ type PodExecResult struct {
 
 func SupportsPodOperations(resourceType string) bool {
 	switch resourceType {
-	case "deployment", "statefulset", "daemonset", "job", "cronjob":
+	case "deployment", "statefulset", "daemonset", "job", "cronjob", "knativeservice":
 		return true
 	default:
 		return false
@@ -69,6 +70,8 @@ func ListWorkloadPods(
 			return listPodsBySelector(ctx, runtime, namespace, selector)
 		}
 		return listPodsForJob(ctx, runtime, namespace, resourceName)
+	case "knativeservice":
+		return listPodsForKnativeService(ctx, runtime, namespace, resourceName)
 	default:
 		selector, err := workloadSelector(ctx, runtime, resourceType, namespace, resourceName)
 		if err != nil {
@@ -290,6 +293,50 @@ func listPodsForCronJob(
 	}
 
 	return serializePods(filtered), nil
+}
+
+func listPodsForKnativeService(
+	ctx context.Context,
+	runtime *Runtime,
+	namespace, serviceName string,
+) ([]WorkloadPod, error) {
+	definition, ok := LookupResource("knativeservice")
+	if !ok {
+		return nil, fmt.Errorf("knative service resource definition is not available")
+	}
+
+	item, err := runtime.Dynamic.Resource(definition.GVR).
+		Namespace(namespace).
+		Get(ctx, serviceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	selector := fmt.Sprintf("serving.knative.dev/service=%s", serviceName)
+	pods, err := listPodsBySelector(ctx, runtime, namespace, selector)
+	if err == nil && len(pods) > 0 {
+		return pods, nil
+	}
+
+	revisionNames := make([]string, 0, 3)
+	if latestReady, found, _ := unstructured.NestedString(item.Object, "status", "latestReadyRevisionName"); found && strings.TrimSpace(latestReady) != "" {
+		revisionNames = append(revisionNames, latestReady)
+	}
+	if latestCreated, found, _ := unstructured.NestedString(item.Object, "status", "latestCreatedRevisionName"); found && strings.TrimSpace(latestCreated) != "" {
+		revisionNames = append(revisionNames, latestCreated)
+	}
+
+	for _, revisionName := range uniqueSortedStrings(revisionNames) {
+		matched, listErr := listPodsBySelector(ctx, runtime, namespace, fmt.Sprintf("serving.knative.dev/revision=%s", revisionName))
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(matched) > 0 {
+			return matched, nil
+		}
+	}
+
+	return []WorkloadPod{}, nil
 }
 
 func serializePods(items []corev1.Pod) []WorkloadPod {

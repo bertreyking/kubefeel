@@ -22,6 +22,7 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   Layout,
   Menu,
   Modal,
@@ -104,6 +105,7 @@ import type {
   Role,
   Session,
   User,
+  WorkloadAutoscaling,
   WorkloadRelations,
   WorkloadHistory,
   WorkloadHistoryItem,
@@ -116,6 +118,29 @@ const legacySessionStorageKey = 'kubefleet-session'
 const defaultProvisionTemplateKey = 'compat-131-132'
 const defaultImageRegistryPresetKey = 'upstream'
 const platformMarkSrc = `${import.meta.env.BASE_URL}kubefeel-mark.svg`
+const SUPPORTED_EVENT_TRIGGER_TYPES = [
+  'cron',
+  'kafka',
+  'rabbitmq',
+  'prometheus',
+  'cpu',
+  'memory',
+  'aws-sqs-queue',
+]
+const KNATIVE_AUTOSCALING_CLASS_OPTIONS = [
+  { label: 'KPA · 并发驱动', value: 'kpa.autoscaling.knative.dev' },
+  { label: 'HPA · 指标桥接', value: 'hpa.autoscaling.knative.dev' },
+]
+const KNATIVE_AUTOSCALING_METRIC_OPTIONS = [
+  { label: 'Concurrency', value: 'concurrency' },
+  { label: 'RPS', value: 'rps' },
+]
+const DEFAULT_KEDA_TRIGGER_TEMPLATE = `- type: cron
+  metadata:
+    timezone: Asia/Shanghai
+    start: "0 8 * * *"
+    end: "0 20 * * *"
+    desiredReplicas: "3"`
 
 type ViewKey =
   | 'dashboard'
@@ -275,9 +300,38 @@ type GrafanaDashboardSubmitMode = 'move' | 'clone'
 type ResourceDrawerMode = 'create' | 'edit' | 'clone' | 'inspect'
 
 type ResourceDrawerPanel = 'yaml' | 'diff' | 'audit'
-type WorkloadDetailTab = 'pods' | 'relations' | 'containers' | 'strategy' | 'metadata' | 'history'
+type WorkloadDetailTab = 'pods' | 'containers' | 'autoscaling' | 'relations' | 'strategy' | 'metadata' | 'history'
 type PodLogStreamStatus = 'connecting' | 'live' | 'stopped' | 'error'
 type PodTerminalStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
+
+type HPAAutoscalingFormValues = {
+  name: string
+  minReplicas: number
+  maxReplicas: number
+  cpuUtilization?: number
+  memoryUtilization?: number
+}
+
+type EventAutoscalingFormValues = {
+  name: string
+  minReplicaCount: number
+  maxReplicaCount: number
+  pollingInterval: number
+  cooldownPeriod: number
+  triggers: string
+}
+
+type APIAutoscalingFormValues = {
+  class: string
+  metric: string
+  target: string
+  targetUtilizationPercentage?: number
+  minScale?: number
+  maxScale?: number
+  scaleDownDelay?: string
+  window?: string
+  scaleToZeroRetention?: string
+}
 
 type PermissionGroup = {
   key: string
@@ -298,6 +352,11 @@ type YamlDiffLine = {
   content: string
   leftNumber?: number
   rightNumber?: number
+}
+
+type YamlDiffRow = {
+  left?: YamlDiffLine
+  right?: YamlDiffLine
 }
 
 type AuditEntry = {
@@ -650,11 +709,17 @@ function Workspace() {
   const [resourceDetailResource, setResourceDetailResource] = useState<K8sObject | null>(null)
   const [resourceDetailTab, setResourceDetailTab] = useState<WorkloadDetailTab>('pods')
   const [resourceDetailPodSearch, setResourceDetailPodSearch] = useState('')
+  const [resourceDetailAutoscaling, setResourceDetailAutoscaling] = useState<WorkloadAutoscaling | null>(null)
+  const [resourceDetailAutoscalingLoading, setResourceDetailAutoscalingLoading] = useState(false)
+  const [autoscalingModalOpen, setAutoscalingModalOpen] = useState(false)
+  const [autoscalingModalMode, setAutoscalingModalMode] = useState<'hpa' | 'event' | 'knative'>('hpa')
+  const [autoscalingSubmitting, setAutoscalingSubmitting] = useState(false)
   const [resourceDetailRelations, setResourceDetailRelations] = useState<WorkloadRelations | null>(null)
   const [resourceDetailRelationsLoading, setResourceDetailRelationsLoading] = useState(false)
   const [resourceDetailHistory, setResourceDetailHistory] = useState<WorkloadHistory | null>(null)
   const [resourceDetailHistoryLoading, setResourceDetailHistoryLoading] = useState(false)
   const [resourceDetailRollbackRevision, setResourceDetailRollbackRevision] = useState<number | null>(null)
+  const [expandedMetadataValueKeys, setExpandedMetadataValueKeys] = useState<Record<string, boolean>>({})
   const [workloadPods, setWorkloadPods] = useState<WorkloadPod[]>([])
   const [workloadPodsLoading, setWorkloadPodsLoading] = useState(false)
   const [podLogsViewer, setPodLogsViewer] = useState<PodLogViewer | null>(null)
@@ -694,6 +759,9 @@ function Workspace() {
   const [grafanaFolderForm] = Form.useForm<GrafanaFolderFormValues>()
   const [grafanaDashboardForm] = Form.useForm<GrafanaDashboardFormValues>()
   const [grafanaBulkActionForm] = Form.useForm<GrafanaBulkActionFormValues>()
+  const [hpaAutoscalingForm] = Form.useForm<HPAAutoscalingFormValues>()
+  const [eventAutoscalingForm] = Form.useForm<EventAutoscalingFormValues>()
+  const [apiAutoscalingForm] = Form.useForm<APIAutoscalingFormValues>()
 
   const podLogsAbortRef = useRef<AbortController | null>(null)
   const podLogsOutputRef = useRef<HTMLDivElement | null>(null)
@@ -849,6 +917,8 @@ function Workspace() {
       setResourceDetailOpen(false)
       setResourceDetailLoading(false)
       setResourceDetailResource(null)
+      setResourceDetailAutoscaling(null)
+      setResourceDetailAutoscalingLoading(false)
       setResourceDetailRelations(null)
       setResourceDetailRelationsLoading(false)
       setResourceDetailHistory(null)
@@ -1089,9 +1159,27 @@ function Workspace() {
     () => summarizeYamlDiff(resourceDiffLines),
     [resourceDiffLines],
   )
+  const resourceChangedDiffLines = useMemo(
+    () => resourceDiffLines.filter((line) => line.type !== 'unchanged'),
+    [resourceDiffLines],
+  )
+  const resourceDiffRows = useMemo(
+    () => buildYamlDiffRows(resourceDiffLines),
+    [resourceDiffLines],
+  )
+  const resourceAuditOwnership = useMemo(
+    () => summarizeManagedFields(editingResource?.metadata?.managedFields ?? []),
+    [editingResource],
+  )
   const resourceAuditEntries = useMemo(
-    () => buildResourceAuditEntries(editingResource, resourceDraftTarget),
-    [editingResource, resourceDraftTarget],
+    () =>
+      buildResourceAuditEntries(
+        editingResource,
+        resourceDraftTarget,
+        resourceDraftDocuments,
+        resourceDiffSummary,
+      ),
+    [editingResource, resourceDraftDocuments, resourceDraftTarget, resourceDiffSummary],
   )
   const resourceRiskItems = useMemo(
     () =>
@@ -1148,6 +1236,23 @@ function Workspace() {
     [resourceDetailHistory],
   )
   const podLogLines = useMemo(() => splitPodLogLines(podLogsContent), [podLogsContent])
+  const workloadAutoscalingSupported = useMemo(
+    () => supportsWorkloadAutoscaling(selectedResourceDefinition?.key),
+    [selectedResourceDefinition],
+  )
+  const resourceMetadataLabels = useMemo(
+    () => Object.entries(resourceDetailResource?.metadata?.labels ?? {}),
+    [resourceDetailResource],
+  )
+  const resourceMetadataAnnotations = useMemo(
+    () =>
+      Object.entries(resourceDetailResource?.metadata?.annotations ?? {}).map(([key, value]) => ({
+        key,
+        rawValue: value,
+        displayValue: formatMetadataValue(value),
+      })),
+    [resourceDetailResource],
+  )
 
   const hydrateWorkspaceEvent = useEffectEvent(
     async (client: ReturnType<typeof createApi>, token: string) => {
@@ -1244,6 +1349,31 @@ function Workspace() {
         handleError(error, '加载版本记录失败')
       } finally {
         setResourceDetailHistoryLoading(false)
+      }
+    },
+  )
+
+  const refreshWorkloadAutoscalingEvent = useEffectEvent(
+    async (
+      client: ReturnType<typeof createApi>,
+      clusterId: number,
+      resourceType: string,
+      workloadName: string,
+      namespace: string,
+    ) => {
+      setResourceDetailAutoscalingLoading(true)
+      try {
+        const result = await client.get<WorkloadAutoscaling>(
+          `/clusters/${clusterId}/workloads/${resourceType}/${workloadName}/autoscaling?${new URLSearchParams({
+            namespace,
+          }).toString()}`,
+        )
+        setResourceDetailAutoscaling(result)
+      } catch (error) {
+        setResourceDetailAutoscaling(null)
+        handleError(error, '加载弹性伸缩失败')
+      } finally {
+        setResourceDetailAutoscalingLoading(false)
       }
     },
   )
@@ -1394,6 +1524,44 @@ function Workspace() {
       !resourceDetailOpen ||
       !resourceDetailResource ||
       !selectedResourceDefinition ||
+      !supportsWorkloadAutoscaling(selectedResourceDefinition.key)
+    ) {
+      setResourceDetailAutoscaling(null)
+      setResourceDetailAutoscalingLoading(false)
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      setResourceDetailAutoscaling(null)
+      setResourceDetailAutoscalingLoading(false)
+      return
+    }
+
+    void refreshWorkloadAutoscalingEvent(
+      api,
+      selectedClusterId,
+      selectedResourceDefinition.key,
+      resourceName(resourceDetailResource),
+      namespace,
+    )
+  }, [
+    api,
+    canReadResources,
+    resourceDetailOpen,
+    resourceDetailResource,
+    selectedClusterId,
+    selectedResourceDefinition,
+  ])
+
+  useEffect(() => {
+    if (
+      !api ||
+      !canReadResources ||
+      !selectedClusterId ||
+      !resourceDetailOpen ||
+      !resourceDetailResource ||
+      !selectedResourceDefinition ||
       !supportsWorkloadRelations(selectedResourceDefinition.key)
     ) {
       setResourceDetailRelations(null)
@@ -1423,6 +1591,10 @@ function Workspace() {
     selectedClusterId,
       selectedResourceDefinition,
   ])
+
+  useEffect(() => {
+    setExpandedMetadataValueKeys({})
+  }, [resourceDetailResource?.metadata?.uid, resourceDetailOpen])
 
   useEffect(() => {
     if (
@@ -2037,6 +2209,8 @@ function Workspace() {
       setResourceDetailOpen(false)
       setResourceDetailLoading(false)
       setResourceDetailResource(null)
+      setResourceDetailAutoscaling(null)
+      setResourceDetailAutoscalingLoading(false)
       setResourceDetailRelations(null)
       setResourceDetailRelationsLoading(false)
       setResourceDetailHistory(null)
@@ -2052,6 +2226,8 @@ function Workspace() {
     setResourceDetailOpen(false)
     setResourceDetailLoading(false)
     setResourceDetailResource(null)
+    setResourceDetailAutoscaling(null)
+    setResourceDetailAutoscalingLoading(false)
     setResourceDetailRelations(null)
     setResourceDetailRelationsLoading(false)
     setResourceDetailHistory(null)
@@ -2116,6 +2292,8 @@ function Workspace() {
     setResourceDetailOpen(false)
     setResourceDetailLoading(false)
     setResourceDetailResource(null)
+    setResourceDetailAutoscaling(null)
+    setResourceDetailAutoscalingLoading(false)
     setResourceDetailRelations(null)
     setResourceDetailRelationsLoading(false)
     setResourceDetailHistory(null)
@@ -3331,7 +3509,7 @@ function Workspace() {
       const detail = await api.get<K8sObject>(
         `/clusters/${selectedClusterId}/resources/${selectedResourceDefinition.key}/${resourceName(resource)}${query}`,
       )
-      const detailYaml = YAML.stringify(detail)
+      const detailYaml = YAML.stringify(sanitizeResourceForYaml(detail))
       setEditingResource(detail)
       setResourceDrawerMode(canWriteResources ? 'edit' : 'inspect')
       setResourceDrawerPanel(panel)
@@ -3366,6 +3544,8 @@ function Workspace() {
     setResourceDetailLoading(true)
     setResourceDetailTab('pods')
     setResourceDetailPodSearch('')
+    setResourceDetailAutoscaling(null)
+    setResourceDetailAutoscalingLoading(false)
     setResourceDetailRelations(null)
     setResourceDetailRelationsLoading(false)
     setResourceDetailHistory(null)
@@ -3495,6 +3675,41 @@ function Workspace() {
       })
   }
 
+  function refreshResourceDetailAutoscaling() {
+    if (
+      !api ||
+      !selectedClusterId ||
+      !selectedResourceDefinition ||
+      !resourceDetailResource ||
+      !supportsWorkloadAutoscaling(selectedResourceDefinition.key)
+    ) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    setResourceDetailAutoscalingLoading(true)
+    void api
+      .get<WorkloadAutoscaling>(
+        `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+          resourceDetailResource,
+        )}/autoscaling?${new URLSearchParams({ namespace }).toString()}`,
+      )
+      .then((result) => {
+        setResourceDetailAutoscaling(result)
+      })
+      .catch((error) => {
+        setResourceDetailAutoscaling(null)
+        handleError(error, '刷新弹性伸缩失败')
+      })
+      .finally(() => {
+        setResourceDetailAutoscalingLoading(false)
+      })
+  }
+
   async function rollbackResourceDetailToRevision(item: WorkloadHistoryItem) {
     if (
       !api ||
@@ -3543,6 +3758,316 @@ function Workspace() {
         }
       },
     })
+  }
+
+  function openHPAAutoscalingModal() {
+    if (!resourceDetailResource) {
+      return
+    }
+
+    setAutoscalingModalMode('hpa')
+    const current = resourceDetailAutoscaling?.metrics
+    hpaAutoscalingForm.setFieldsValue({
+      name: current?.name || `${resourceName(resourceDetailResource)}-hpa`,
+      minReplicas: current?.configured ? current.minReplicas : 1,
+      maxReplicas: current?.configured ? current.maxReplicas : 3,
+      cpuUtilization: current?.metrics.find((item) => item.label.includes('cpu'))?.target
+        ? extractPercentValue(current.metrics.find((item) => item.label.includes('cpu'))?.target)
+        : 80,
+      memoryUtilization: current?.metrics.find((item) => item.label.includes('memory'))?.target
+        ? extractPercentValue(current.metrics.find((item) => item.label.includes('memory'))?.target)
+        : undefined,
+    })
+    setAutoscalingModalOpen(true)
+  }
+
+  function openEventAutoscalingModal() {
+    if (!resourceDetailResource) {
+      return
+    }
+
+    setAutoscalingModalMode('event')
+    const current = resourceDetailAutoscaling?.event
+    eventAutoscalingForm.setFieldsValue({
+      name: current?.name || `${resourceName(resourceDetailResource)}-scaledobject`,
+      minReplicaCount: current?.configured ? current.minReplicaCount : 0,
+      maxReplicaCount: current?.configured ? current.maxReplicaCount : 5,
+      pollingInterval: current?.configured ? current.pollingInterval || 30 : 30,
+      cooldownPeriod: current?.configured ? current.cooldownPeriod || 300 : 300,
+      triggers: current?.configured
+        ? YAML.stringify(
+            current.triggers.map((item) => ({
+              type: item.type,
+              metadata: item.metadata || {},
+            })),
+          )
+        : DEFAULT_KEDA_TRIGGER_TEMPLATE,
+    })
+    setAutoscalingModalOpen(true)
+  }
+
+  function openAPIAutoscalingModal() {
+    if (!resourceDetailResource) {
+      return
+    }
+
+    setAutoscalingModalMode('knative')
+    const current = resourceDetailAutoscaling?.api
+    apiAutoscalingForm.setFieldsValue({
+      class: current?.class || 'kpa.autoscaling.knative.dev',
+      metric: current?.metric || 'concurrency',
+      target: current?.target || '100',
+      targetUtilizationPercentage:
+        current?.targetUtilizationPercentage && current.targetUtilizationPercentage > 0
+          ? current.targetUtilizationPercentage
+          : undefined,
+      minScale:
+        current && (current.configured || current.minScale > 0) ? current.minScale : undefined,
+      maxScale:
+        current && (current.configured || current.maxScale > 0) ? current.maxScale : undefined,
+      scaleDownDelay: current?.scaleDownDelay || undefined,
+      window: current?.window || undefined,
+      scaleToZeroRetention: current?.scaleToZeroRetention || undefined,
+    })
+    setAutoscalingModalOpen(true)
+  }
+
+  function closeAutoscalingModal() {
+    setAutoscalingModalOpen(false)
+    setAutoscalingSubmitting(false)
+    hpaAutoscalingForm.resetFields()
+    eventAutoscalingForm.resetFields()
+    apiAutoscalingForm.resetFields()
+  }
+
+  async function submitHPAAutoscaling() {
+    if (!api || !selectedClusterId || !selectedResourceDefinition || !resourceDetailResource) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    try {
+      const values = await hpaAutoscalingForm.validateFields()
+      if (!values.cpuUtilization && !values.memoryUtilization) {
+        message.error('至少配置一个 CPU 或 Memory 目标阈值')
+        return
+      }
+      if (values.maxReplicas < values.minReplicas) {
+        message.error('最大副本数需要大于或等于最小副本数')
+        return
+      }
+      setAutoscalingSubmitting(true)
+      await api.put(
+        `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+          resourceDetailResource,
+        )}/autoscaling/hpa?${new URLSearchParams({ namespace }).toString()}`,
+        {
+          name: values.name,
+          minReplicas: values.minReplicas,
+          maxReplicas: values.maxReplicas,
+          cpuUtilization: values.cpuUtilization || undefined,
+          memoryUtilization: values.memoryUtilization || undefined,
+        },
+      )
+      message.success('指标型弹性伸缩已保存')
+      closeAutoscalingModal()
+      refreshResourceDetailAutoscaling()
+    } catch (error) {
+      if (!isFormValidationError(error)) {
+        handleError(error, '保存指标型弹性伸缩失败')
+      }
+    } finally {
+      setAutoscalingSubmitting(false)
+    }
+  }
+
+  async function submitEventAutoscaling() {
+    if (!api || !selectedClusterId || !selectedResourceDefinition || !resourceDetailResource) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    try {
+      const values = await eventAutoscalingForm.validateFields()
+      if (values.maxReplicaCount < values.minReplicaCount) {
+        message.error('最大副本数需要大于或等于最小副本数')
+        return
+      }
+      const parsed = YAML.parse(values.triggers)
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        message.error('触发器配置需要是一个 YAML 数组')
+        return
+      }
+      const triggers = parsed.map((item) => {
+        const record = asRecord(item)
+        if (!record || typeof record.type !== 'string') {
+          throw new Error('每个触发器都需要 type 字段')
+        }
+        const metadataRecord = asRecord(record.metadata) ?? {}
+        return {
+          type: String(record.type),
+          metadata: Object.fromEntries(
+            Object.entries(metadataRecord).map(([key, value]) => [key, String(value ?? '')]),
+          ),
+        }
+      })
+
+      setAutoscalingSubmitting(true)
+      await api.put(
+        `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+          resourceDetailResource,
+        )}/autoscaling/keda?${new URLSearchParams({ namespace }).toString()}`,
+        {
+          name: values.name,
+          minReplicaCount: values.minReplicaCount,
+          maxReplicaCount: values.maxReplicaCount,
+          pollingInterval: values.pollingInterval,
+          cooldownPeriod: values.cooldownPeriod,
+          triggers,
+        },
+      )
+      message.success('事件型弹性伸缩已保存')
+      closeAutoscalingModal()
+      refreshResourceDetailAutoscaling()
+    } catch (error) {
+      if (!isFormValidationError(error)) {
+        handleError(error, '保存事件型弹性伸缩失败')
+      }
+    } finally {
+      setAutoscalingSubmitting(false)
+    }
+  }
+
+  async function submitAPIAutoscaling() {
+    if (!api || !selectedClusterId || !selectedResourceDefinition || !resourceDetailResource) {
+      return
+    }
+
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    try {
+      const values = await apiAutoscalingForm.validateFields()
+      if (!values.target?.trim()) {
+        message.error('请输入目标并发或 RPS')
+        return
+      }
+      if (
+        typeof values.minScale === 'number' &&
+        typeof values.maxScale === 'number' &&
+        values.maxScale < values.minScale
+      ) {
+        message.error('最大实例数需要大于或等于最小实例数')
+        return
+      }
+
+      setAutoscalingSubmitting(true)
+      await api.put(
+        `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+          resourceDetailResource,
+        )}/autoscaling/knative?${new URLSearchParams({ namespace }).toString()}`,
+        {
+          class: values.class,
+          metric: values.metric,
+          target: values.target.trim(),
+          targetUtilizationPercentage: values.targetUtilizationPercentage || undefined,
+          minScale: typeof values.minScale === 'number' ? values.minScale : undefined,
+          maxScale: typeof values.maxScale === 'number' ? values.maxScale : undefined,
+          scaleDownDelay: values.scaleDownDelay?.trim() || '',
+          window: values.window?.trim() || '',
+          scaleToZeroRetention: values.scaleToZeroRetention?.trim() || '',
+        },
+      )
+      message.success('请求型弹性伸缩已保存')
+      closeAutoscalingModal()
+      refreshResourceDetailAutoscaling()
+    } catch (error) {
+      if (!isFormValidationError(error)) {
+        handleError(error, '保存请求型弹性伸缩失败')
+      }
+    } finally {
+      setAutoscalingSubmitting(false)
+    }
+  }
+
+  function removeWorkloadAutoscaling(kind: 'hpa' | 'keda' | 'knative') {
+    if (!api || !selectedClusterId || !selectedResourceDefinition || !resourceDetailResource) {
+      return
+    }
+    const namespace = resourceNamespace(resourceDetailResource)
+    if (!namespace) {
+      return
+    }
+
+    modal.confirm({
+      title:
+        kind === 'hpa'
+          ? '删除指标型弹性伸缩'
+          : kind === 'keda'
+            ? '删除事件型弹性伸缩'
+            : '删除请求型弹性伸缩',
+      content:
+        kind === 'hpa'
+          ? '将删除当前工作负载关联的 HPA 配置。'
+          : kind === 'keda'
+            ? '将删除当前工作负载关联的 ScaledObject 配置。'
+            : '将移除当前 Knative Service 的自定义请求型弹性伸缩注解，恢复集群默认行为。',
+      okText: '确认删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await api.delete(
+            `/clusters/${selectedClusterId}/workloads/${selectedResourceDefinition.key}/${resourceName(
+              resourceDetailResource,
+            )}/autoscaling/${kind === 'hpa' ? 'hpa' : kind === 'keda' ? 'keda' : 'knative'}?${new URLSearchParams({ namespace }).toString()}`,
+          )
+          message.success(
+            kind === 'hpa'
+              ? '指标型弹性伸缩已删除'
+              : kind === 'keda'
+                ? '事件型弹性伸缩已删除'
+                : '请求型弹性伸缩已删除',
+          )
+          refreshResourceDetailAutoscaling()
+        } catch (error) {
+          handleError(
+            error,
+            kind === 'hpa'
+              ? '删除指标型弹性伸缩失败'
+              : kind === 'keda'
+                ? '删除事件型弹性伸缩失败'
+                : '删除请求型弹性伸缩失败',
+          )
+        }
+      },
+    })
+  }
+
+  function toggleMetadataValue(key: string) {
+    setExpandedMetadataValueKeys((current) => ({
+      ...current,
+      [key]: !current[key],
+    }))
+  }
+
+  async function copyMetadataValue(key: string, value: string) {
+    try {
+      await copyText(value)
+      message.success(`已复制 ${key}`)
+    } catch (error) {
+      handleError(error, '复制注解失败')
+    }
   }
 
   function openPodLogs(pod: WorkloadPod) {
@@ -3701,7 +4226,7 @@ function Workspace() {
     setEditingResource(resource)
     setResourceDrawerMode('clone')
     setResourceDrawerPanel('yaml')
-    setResourceBaselineDraft(YAML.stringify(resource))
+    setResourceBaselineDraft(YAML.stringify(sanitizeResourceForYaml(resource)))
     setResourceDraft(YAML.stringify(cloned))
     setResourceDrawerOpen(true)
   }
@@ -4205,6 +4730,8 @@ function Workspace() {
     setResourceDetailResource(null)
     setResourceDetailTab('pods')
     setResourceDetailPodSearch('')
+    setResourceDetailAutoscaling(null)
+    setResourceDetailAutoscalingLoading(false)
     setResourceDetailRelations(null)
     setResourceDetailRelationsLoading(false)
     setResourceDetailHistory(null)
@@ -4212,6 +4739,7 @@ function Workspace() {
     setResourceDetailRollbackRevision(null)
     setWorkloadPods([])
     setWorkloadPodsLoading(false)
+    closeAutoscalingModal()
     closePodLogsModal()
     closePodTerminalModal()
   }
@@ -8238,6 +8766,246 @@ function Workspace() {
         </div>
       </Modal>
 
+      <Modal
+        title={
+          autoscalingModalMode === 'hpa'
+            ? `${resourceDetailAutoscaling?.metrics.configured ? '编辑' : '启用'}指标型弹性伸缩`
+            : autoscalingModalMode === 'event'
+              ? `${resourceDetailAutoscaling?.event.configured ? '编辑' : '启用'}事件型弹性伸缩`
+              : `${resourceDetailAutoscaling?.api.configured ? '编辑' : '启用'}请求型弹性伸缩`
+        }
+        open={autoscalingModalOpen}
+        onCancel={closeAutoscalingModal}
+        onOk={() =>
+          void (autoscalingModalMode === 'hpa'
+            ? submitHPAAutoscaling()
+            : autoscalingModalMode === 'event'
+              ? submitEventAutoscaling()
+              : submitAPIAutoscaling())
+        }
+        okText={
+          autoscalingModalMode === 'hpa'
+            ? '保存 HPA'
+            : autoscalingModalMode === 'event'
+              ? '保存事件型策略'
+              : '保存请求型策略'
+        }
+        okButtonProps={{ loading: autoscalingSubmitting }}
+        width={920}
+      >
+        <div className="modal-split autoscaling-modal-shell">
+          {autoscalingModalMode === 'hpa' ? (
+            <>
+              <Form layout="vertical" form={hpaAutoscalingForm}>
+                <Form.Item
+                  name="name"
+                  label="策略名称"
+                  rules={[{ required: true, message: '请输入 HPA 名称' }]}
+                >
+                  <Input placeholder="例如：demo-app-hpa" />
+                </Form.Item>
+                <div className="autoscaling-form-grid">
+                  <Form.Item
+                    name="minReplicas"
+                    label="最小副本数"
+                    rules={[{ required: true, message: '请输入最小副本数' }]}
+                  >
+                    <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item
+                    name="maxReplicas"
+                    label="最大副本数"
+                    rules={[{ required: true, message: '请输入最大副本数' }]}
+                  >
+                    <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item name="cpuUtilization" label="CPU 目标利用率 (%)">
+                    <InputNumber min={1} max={100} style={{ width: '100%' }} placeholder="例如 80" />
+                  </Form.Item>
+                  <Form.Item name="memoryUtilization" label="Memory 目标利用率 (%)">
+                    <InputNumber min={1} max={100} style={{ width: '100%' }} placeholder="例如 75" />
+                  </Form.Item>
+                </div>
+              </Form>
+
+              <aside className="modal-aside autoscaling-modal-aside">
+                <Typography.Title level={5}>配置说明</Typography.Title>
+                <Typography.Text type="secondary">
+                  HPA 适合基于 CPU / Memory 指标自动扩缩容。
+                </Typography.Text>
+                <Divider />
+                <div className="inspector-stack">
+                  <div className="identity-block compact-identity-block">
+                    <strong>目标对象</strong>
+                    <span>{resourceDetailResource ? resourceName(resourceDetailResource) : '-'}</span>
+                  </div>
+                  <div className="identity-block compact-identity-block">
+                    <strong>当前范围</strong>
+                    <span>
+                      {resourceDetailAutoscaling?.metrics.configured
+                        ? `${resourceDetailAutoscaling.metrics.minReplicas} - ${resourceDetailAutoscaling.metrics.maxReplicas}`
+                        : '尚未配置'}
+                    </span>
+                  </div>
+                  <div className="identity-block compact-identity-block">
+                    <strong>配置建议</strong>
+                    <span>至少填写一个 CPU 或 Memory 阈值，常见目标值在 60 - 85% 之间。</span>
+                  </div>
+                </div>
+              </aside>
+            </>
+          ) : autoscalingModalMode === 'event' ? (
+            <>
+              <Form layout="vertical" form={eventAutoscalingForm}>
+                <Form.Item
+                  name="name"
+                  label="策略名称"
+                  rules={[{ required: true, message: '请输入事件型策略名称' }]}
+                >
+                  <Input placeholder="例如：demo-app-scaledobject" />
+                </Form.Item>
+                <div className="autoscaling-form-grid">
+                  <Form.Item
+                    name="minReplicaCount"
+                    label="最小副本数"
+                    rules={[{ required: true, message: '请输入最小副本数' }]}
+                  >
+                    <InputNumber min={0} max={1000} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item
+                    name="maxReplicaCount"
+                    label="最大副本数"
+                    rules={[{ required: true, message: '请输入最大副本数' }]}
+                  >
+                    <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item
+                    name="pollingInterval"
+                    label="轮询间隔 (秒)"
+                    rules={[{ required: true, message: '请输入轮询间隔' }]}
+                  >
+                    <InputNumber min={1} max={3600} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item
+                    name="cooldownPeriod"
+                    label="冷却时间 (秒)"
+                    rules={[{ required: true, message: '请输入冷却时间' }]}
+                  >
+                    <InputNumber min={0} max={86400} style={{ width: '100%' }} />
+                  </Form.Item>
+                </div>
+                <Form.Item
+                  name="triggers"
+                  label="触发器 YAML"
+                  rules={[{ required: true, message: '请输入至少一个触发器' }]}
+                  extra="使用 YAML 数组描述触发器，每个触发器至少要包含 type 和 metadata。"
+                >
+                  <Input.TextArea
+                    rows={14}
+                    className="autoscaling-trigger-editor"
+                    placeholder={DEFAULT_KEDA_TRIGGER_TEMPLATE}
+                  />
+                </Form.Item>
+              </Form>
+
+              <aside className="modal-aside autoscaling-modal-aside">
+                <Typography.Title level={5}>触发器建议</Typography.Title>
+                <Typography.Text type="secondary">
+                  事件型弹性伸缩依赖 KEDA，可按消息队列、Cron 或 Prometheus 指标驱动。
+                </Typography.Text>
+                <Divider />
+                <div className="inspector-stack">
+                  <div className="identity-block compact-identity-block">
+                    <strong>支持类型</strong>
+                    <span>{SUPPORTED_EVENT_TRIGGER_TYPES.join(' / ')}</span>
+                  </div>
+                  <div className="identity-block compact-identity-block">
+                    <strong>当前策略</strong>
+                    <span>
+                      {resourceDetailAutoscaling?.event.configured
+                        ? `${resourceDetailAutoscaling.event.triggers.length} 个触发器`
+                        : '尚未配置'}
+                    </span>
+                  </div>
+                  <div className="identity-block compact-identity-block">
+                    <strong>推荐起步</strong>
+                    <span>先用单一触发器验证伸缩，再逐步叠加 Prometheus 或队列类规则。</span>
+                  </div>
+                </div>
+              </aside>
+            </>
+          ) : (
+            <>
+              <Form layout="vertical" form={apiAutoscalingForm}>
+                <div className="autoscaling-form-grid">
+                  <Form.Item
+                    name="class"
+                    label="伸缩器类型"
+                    rules={[{ required: true, message: '请选择 Knative 伸缩类型' }]}
+                  >
+                    <Select options={KNATIVE_AUTOSCALING_CLASS_OPTIONS} />
+                  </Form.Item>
+                  <Form.Item
+                    name="metric"
+                    label="请求指标类型"
+                    rules={[{ required: true, message: '请选择请求指标类型' }]}
+                  >
+                    <Select options={KNATIVE_AUTOSCALING_METRIC_OPTIONS} />
+                  </Form.Item>
+                  <Form.Item
+                    name="target"
+                    label="目标值"
+                    rules={[{ required: true, message: '请输入目标并发或 RPS' }]}
+                  >
+                    <Input placeholder="例如：100" />
+                  </Form.Item>
+                  <Form.Item name="targetUtilizationPercentage" label="目标利用率 (%)">
+                    <InputNumber min={1} max={100} style={{ width: '100%' }} placeholder="例如 70" />
+                  </Form.Item>
+                  <Form.Item name="minScale" label="最小实例数">
+                    <InputNumber min={0} max={1000} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item name="maxScale" label="最大实例数">
+                    <InputNumber min={1} max={1000} style={{ width: '100%' }} />
+                  </Form.Item>
+                  <Form.Item name="scaleDownDelay" label="缩容延迟">
+                    <Input placeholder="例如：30s / 2m" />
+                  </Form.Item>
+                  <Form.Item name="window" label="统计窗口">
+                    <Input placeholder="例如：60s" />
+                  </Form.Item>
+                </div>
+                <Form.Item name="scaleToZeroRetention" label="Scale to Zero 保留时间">
+                  <Input placeholder="例如：30s" />
+                </Form.Item>
+              </Form>
+
+              <aside className="modal-aside autoscaling-modal-aside">
+                <Typography.Title level={5}>Knative 说明</Typography.Title>
+                <Typography.Text type="secondary">
+                  请求型弹性伸缩基于 Knative Service 的请求流量，可按并发或 RPS 自动扩缩容并支持 scale to zero。
+                </Typography.Text>
+                <Divider />
+                <div className="inspector-stack">
+                  <div className="identity-block compact-identity-block">
+                    <strong>当前地址</strong>
+                    <span>{resourceDetailAutoscaling?.api.url || '等待 Knative Service Ready'}</span>
+                  </div>
+                  <div className="identity-block compact-identity-block">
+                    <strong>最新 Revision</strong>
+                    <span>{resourceDetailAutoscaling?.api.latestReadyRevision || '暂无'}</span>
+                  </div>
+                  <div className="identity-block compact-identity-block">
+                    <strong>推荐起步</strong>
+                    <span>并发型服务可先用 KPA + concurrency=100，再按流量稳定性调 min/max scale。</span>
+                  </div>
+                </div>
+              </aside>
+            </>
+          )}
+        </div>
+      </Modal>
+
       <Drawer
         title={
           resourceDetailSupportsPodOps
@@ -8390,6 +9158,274 @@ function Workspace() {
                       />
                     ) : (
                       <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载没有容器配置" />
+                    ),
+                  },
+                  {
+                    key: 'autoscaling',
+                    label: '弹性伸缩',
+                    children: workloadAutoscalingSupported ? (
+                      <div className="workload-tab-shell">
+                        <div className="workload-tab-toolbar">
+                          <div className="resource-relation-summary">
+                            <Tag color={resourceDetailAutoscaling?.metrics.configured ? 'blue' : 'default'}>
+                              {resourceDetailAutoscaling?.metrics.configured ? '指标型弹性伸缩已启用' : '指标型弹性伸缩未启用'}
+                            </Tag>
+                            <Tag
+                              color={
+                                resourceDetailAutoscaling?.event.available
+                                  ? resourceDetailAutoscaling?.event.configured
+                                    ? 'purple'
+                                    : 'default'
+                                  : 'gold'
+                              }
+                            >
+                              {!resourceDetailAutoscaling?.event.available
+                                ? 'KEDA 未安装'
+                                : resourceDetailAutoscaling?.event.configured
+                                  ? '事件型弹性伸缩已启用'
+                                  : '事件型弹性伸缩未启用'}
+                            </Tag>
+                            <Tag
+                              color={
+                                resourceDetailAutoscaling?.api.available
+                                  ? resourceDetailAutoscaling?.api.configured
+                                    ? 'cyan'
+                                    : 'default'
+                                  : 'gold'
+                              }
+                            >
+                              {!resourceDetailAutoscaling?.api.supported
+                                ? '请求型弹性伸缩不适用'
+                                : !resourceDetailAutoscaling?.api.available
+                                  ? 'Knative 未安装'
+                                  : resourceDetailAutoscaling?.api.configured
+                                    ? '请求型弹性伸缩已启用'
+                                    : '请求型弹性伸缩未启用'}
+                            </Tag>
+                          </div>
+                          <Button icon={<ReloadOutlined />} onClick={refreshResourceDetailAutoscaling}>
+                            刷新策略
+                          </Button>
+                        </div>
+
+                        {resourceDetailAutoscalingLoading ? (
+                          <div className="resource-detail-placeholder">
+                            <Spin size="small" />
+                            <Typography.Text type="secondary">正在加载弹性伸缩配置</Typography.Text>
+                          </div>
+                        ) : (
+                          <div className="autoscaling-grid">
+                            <section className="autoscaling-panel">
+                              <div className="section-headline compact-headline">
+                                <div>
+                                  <Typography.Title level={5}>指标型</Typography.Title>
+                                  <Typography.Text type="secondary">
+                                    基于 CPU / Memory 指标的 HPA。
+                                  </Typography.Text>
+                                </div>
+                                {canWriteResources ? (
+                                  <Space>
+                                    <Button size="small" onClick={openHPAAutoscalingModal}>
+                                      {resourceDetailAutoscaling?.metrics.configured ? '编辑 HPA' : '启用 HPA'}
+                                    </Button>
+                                    {resourceDetailAutoscaling?.metrics.configured ? (
+                                      <Button danger size="small" onClick={() => removeWorkloadAutoscaling('hpa')}>
+                                        删除
+                                      </Button>
+                                    ) : null}
+                                  </Space>
+                                ) : null}
+                              </div>
+
+                              {resourceDetailAutoscaling?.metrics.configured ? (
+                                <div className="autoscaling-panel-stack">
+                                  <div className="autoscaling-summary-grid">
+                                    <article className="autoscaling-summary-card">
+                                      <span>缩容范围</span>
+                                      <strong>{`${resourceDetailAutoscaling.metrics.minReplicas} - ${resourceDetailAutoscaling.metrics.maxReplicas}`}</strong>
+                                    </article>
+                                    <article className="autoscaling-summary-card">
+                                      <span>当前 / 期望</span>
+                                      <strong>{`${resourceDetailAutoscaling.metrics.currentReplicas} / ${resourceDetailAutoscaling.metrics.desiredReplicas}`}</strong>
+                                    </article>
+                                    <article className="autoscaling-summary-card">
+                                      <span>策略名称</span>
+                                      <strong>{resourceDetailAutoscaling.metrics.name}</strong>
+                                    </article>
+                                  </div>
+                                  <div className="autoscaling-metric-list">
+                                    {resourceDetailAutoscaling.metrics.metrics.map((item) => (
+                                      <article key={`${item.label}-${item.target}`} className="autoscaling-metric-card">
+                                        <strong>{item.label}</strong>
+                                        <span>{`当前 ${item.current || '-'} / 目标 ${item.target || '-'}`}</span>
+                                      </article>
+                                    ))}
+                                  </div>
+                                  {resourceDetailAutoscaling.metrics.lastScaleTime ? (
+                                    <Typography.Text type="secondary">
+                                      最近伸缩：{formatDate(resourceDetailAutoscaling.metrics.lastScaleTime)}
+                                    </Typography.Text>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <Empty
+                                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                                  description="当前工作负载还没有配置 HPA，可按 CPU / Memory 阈值启用。"
+                                />
+                              )}
+                            </section>
+
+                            <section className="autoscaling-panel">
+                              <div className="section-headline compact-headline">
+                                <div>
+                                  <Typography.Title level={5}>事件型</Typography.Title>
+                                  <Typography.Text type="secondary">
+                                    基于 KEDA 触发器的事件型伸缩。
+                                  </Typography.Text>
+                                </div>
+                                {canWriteResources && resourceDetailAutoscaling?.event.available ? (
+                                  <Space>
+                                    <Button size="small" onClick={openEventAutoscalingModal}>
+                                      {resourceDetailAutoscaling?.event.configured ? '编辑事件型策略' : '启用事件型策略'}
+                                    </Button>
+                                    {resourceDetailAutoscaling?.event.configured ? (
+                                      <Button danger size="small" onClick={() => removeWorkloadAutoscaling('keda')}>
+                                        删除
+                                      </Button>
+                                    ) : null}
+                                  </Space>
+                                ) : null}
+                              </div>
+
+                              {!resourceDetailAutoscaling?.event.available ? (
+                                <Alert
+                                  type="warning"
+                                  showIcon
+                                  message="当前集群未检测到 KEDA"
+                                  description="如需事件型弹性伸缩，请先安装 KEDA Operator。"
+                                />
+                              ) : resourceDetailAutoscaling?.event.configured ? (
+                                <div className="autoscaling-panel-stack">
+                                  <div className="autoscaling-summary-grid">
+                                    <article className="autoscaling-summary-card">
+                                      <span>缩容范围</span>
+                                      <strong>{`${resourceDetailAutoscaling.event.minReplicaCount} - ${resourceDetailAutoscaling.event.maxReplicaCount}`}</strong>
+                                    </article>
+                                    <article className="autoscaling-summary-card">
+                                      <span>轮询 / 冷却</span>
+                                      <strong>{`${resourceDetailAutoscaling.event.pollingInterval}s / ${resourceDetailAutoscaling.event.cooldownPeriod}s`}</strong>
+                                    </article>
+                                    <article className="autoscaling-summary-card">
+                                      <span>策略名称</span>
+                                      <strong>{resourceDetailAutoscaling.event.name}</strong>
+                                    </article>
+                                  </div>
+                                  <div className="autoscaling-trigger-list">
+                                    {resourceDetailAutoscaling.event.triggers.map((trigger, index) => (
+                                      <article key={`${trigger.type}-${index}`} className="autoscaling-trigger-card">
+                                        <strong>{trigger.type}</strong>
+                                        <span>{formatTriggerMetadata(trigger.metadata)}</span>
+                                      </article>
+                                    ))}
+                                  </div>
+                                  {resourceDetailAutoscaling.event.lastActiveTime ? (
+                                    <Typography.Text type="secondary">
+                                      最近活跃：{formatDate(resourceDetailAutoscaling.event.lastActiveTime)}
+                                    </Typography.Text>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <Empty
+                                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                                  description="当前工作负载还没有配置事件触发器，可按队列、Cron 或 Prometheus 指标进行伸缩。"
+                                />
+                              )}
+                            </section>
+
+                            <section className="autoscaling-panel">
+                              <div className="section-headline compact-headline">
+                                <div>
+                                  <Typography.Title level={5}>请求型</Typography.Title>
+                                  <Typography.Text type="secondary">
+                                    基于 Knative Service 请求流量的请求型伸缩。
+                                  </Typography.Text>
+                                </div>
+                                {canWriteResources && resourceDetailAutoscaling?.api.supported && resourceDetailAutoscaling?.api.available ? (
+                                  <Space>
+                                    <Button size="small" onClick={openAPIAutoscalingModal}>
+                                      {resourceDetailAutoscaling?.api.configured ? '编辑请求型策略' : '启用请求型策略'}
+                                    </Button>
+                                    {resourceDetailAutoscaling?.api.configured ? (
+                                      <Button danger size="small" onClick={() => removeWorkloadAutoscaling('knative')}>
+                                        删除
+                                      </Button>
+                                    ) : null}
+                                  </Space>
+                                ) : null}
+                              </div>
+
+                              {!resourceDetailAutoscaling?.api.supported ? (
+                                <Alert
+                                  type="info"
+                                  showIcon
+                                  message="当前资源类型不适用"
+                                  description="请求型弹性伸缩适用于 Knative Service，请在 Knative Service 资源详情中配置。"
+                                />
+                              ) : !resourceDetailAutoscaling?.api.available ? (
+                                <Alert
+                                  type="warning"
+                                  showIcon
+                                  message="当前集群未检测到 Knative Serving"
+                                  description="如需请求型弹性伸缩，请先安装 Knative Serving。"
+                                />
+                              ) : resourceDetailAutoscaling?.api.configured ? (
+                                <div className="autoscaling-panel-stack">
+                                  <div className="autoscaling-summary-grid">
+                                    <article className="autoscaling-summary-card">
+                                      <span>实例范围</span>
+                                      <strong>{`${resourceDetailAutoscaling.api.minScale} - ${resourceDetailAutoscaling.api.maxScale || '∞'}`}</strong>
+                                    </article>
+                                    <article className="autoscaling-summary-card">
+                                      <span>指标 / 目标</span>
+                                      <strong>{`${resourceDetailAutoscaling.api.metric || '-'} / ${resourceDetailAutoscaling.api.target || '-'}`}</strong>
+                                    </article>
+                                    <article className="autoscaling-summary-card">
+                                      <span>最新 Revision</span>
+                                      <strong>{resourceDetailAutoscaling.api.latestReadyRevision || '-'}</strong>
+                                    </article>
+                                  </div>
+                                  <div className="autoscaling-trigger-list">
+                                    <article className="autoscaling-trigger-card">
+                                      <strong>伸缩器类型</strong>
+                                      <span>{resourceDetailAutoscaling.api.class || '-'}</span>
+                                    </article>
+                                    <article className="autoscaling-trigger-card">
+                                      <strong>服务地址</strong>
+                                      <span>{resourceDetailAutoscaling.api.url || '-'}</span>
+                                    </article>
+                                    <article className="autoscaling-trigger-card">
+                                      <strong>窗口 / 缩容延迟</strong>
+                                      <span>{`${resourceDetailAutoscaling.api.window || '-'} / ${resourceDetailAutoscaling.api.scaleDownDelay || '-'}`}</span>
+                                    </article>
+                                  </div>
+                                  {resourceDetailAutoscaling.api.targetUtilizationPercentage > 0 ? (
+                                    <Typography.Text type="secondary">
+                                      目标利用率：{resourceDetailAutoscaling.api.targetUtilizationPercentage}%
+                                    </Typography.Text>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <Empty
+                                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                                  description="当前 Knative Service 还没有自定义请求型弹性伸缩规则，可按并发或 RPS 启用。"
+                                />
+                              )}
+                            </section>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前工作负载类型暂不支持弹性伸缩配置" />
                     ),
                   },
                   {
@@ -8614,12 +9650,15 @@ function Workspace() {
                         <section className="workload-info-panel">
                           <div className="inspector-subtitle-row">
                             <strong>对象 Labels</strong>
-                            <span>{Object.keys(resourceDetailResource.metadata?.labels ?? {}).length}</span>
+                            <span>{resourceMetadataLabels.length}</span>
                           </div>
-                          <div className="tag-cloud">
-                            {Object.entries(resourceDetailResource.metadata?.labels ?? {}).length > 0 ? (
-                              Object.entries(resourceDetailResource.metadata?.labels ?? {}).map(([key, value]) => (
-                                <Tag key={`label-${key}`}>{`${key}: ${value}`}</Tag>
+                          <div className="metadata-pair-grid">
+                            {resourceMetadataLabels.length > 0 ? (
+                              resourceMetadataLabels.map(([key, value]) => (
+                                <article key={`label-${key}`} className="metadata-pair-card">
+                                  <span className="metadata-pair-key">{key}</span>
+                                  <strong className="metadata-pair-value">{value}</strong>
+                                </article>
                               ))
                             ) : (
                               <Typography.Text type="secondary">当前资源没有 labels</Typography.Text>
@@ -8629,13 +9668,48 @@ function Workspace() {
                         <section className="workload-info-panel">
                           <div className="inspector-subtitle-row">
                             <strong>对象 Annotations</strong>
-                            <span>{Object.keys(resourceDetailResource.metadata?.annotations ?? {}).length}</span>
+                            <span>{resourceMetadataAnnotations.length}</span>
                           </div>
-                          <div className="tag-cloud">
-                            {Object.entries(resourceDetailResource.metadata?.annotations ?? {}).length > 0 ? (
-                              Object.entries(resourceDetailResource.metadata?.annotations ?? {}).map(([key, value]) => (
-                                <Tag key={`annotation-${key}`}>{`${key}: ${value}`}</Tag>
-                              ))
+                          <div className="metadata-entry-list">
+                            {resourceMetadataAnnotations.length > 0 ? (
+                              resourceMetadataAnnotations.map((annotation) => {
+                                const isLong = shouldExpandMetadataValue(annotation.displayValue)
+                                const isExpanded = expandedMetadataValueKeys[annotation.key] === true
+
+                                return (
+                                  <article key={`annotation-${annotation.key}`} className="metadata-entry-card">
+                                    <div className="metadata-entry-head">
+                                      <strong className="metadata-entry-key">{annotation.key}</strong>
+                                      <Space size="small">
+                                        <Button
+                                          size="small"
+                                          type="text"
+                                          icon={<CopyOutlined />}
+                                          onClick={() => void copyMetadataValue(annotation.key, annotation.rawValue)}
+                                        >
+                                          复制
+                                        </Button>
+                                        {isLong ? (
+                                          <Button
+                                            size="small"
+                                            type="link"
+                                            onClick={() => toggleMetadataValue(annotation.key)}
+                                          >
+                                            {isExpanded ? '收起' : '展开'}
+                                          </Button>
+                                        ) : null}
+                                      </Space>
+                                    </div>
+                                    <pre
+                                      className={`metadata-entry-value${
+                                        isExpanded ? ' is-expanded' : ' is-collapsed'
+                                      }`}
+                                    >
+                                      {annotation.displayValue}
+                                    </pre>
+                                  </article>
+                                )
+                              })
                             ) : (
                               <Typography.Text type="secondary">当前资源没有 annotations</Typography.Text>
                             )}
@@ -9192,31 +10266,47 @@ function Workspace() {
                 <strong>{resourceDiffSummary.removed}</strong>
               </div>
               <div className="diff-summary-unit">
-                <span>Unchanged</span>
-                <strong>{resourceDiffSummary.unchanged}</strong>
+                <span>Changed Lines</span>
+                <strong>{resourceChangedDiffLines.length}</strong>
               </div>
             </div>
             <div className="diff-panel">
-              {resourceDiffLines.length > 0 ? (
-                resourceDiffLines.map((line, index) => (
-                  <div
-                    key={`${line.type}-${index}-${line.leftNumber ?? 0}-${line.rightNumber ?? 0}`}
-                    className={`diff-line diff-line-${line.type}`}
-                  >
-                    <span className="diff-gutter">
-                      {line.leftNumber ?? ''}
-                    </span>
-                    <span className="diff-gutter">
-                      {line.rightNumber ?? ''}
-                    </span>
-                    <span className="diff-marker">
-                      {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
-                    </span>
-                    <span className="diff-content">{line.content || ' '}</span>
+              {resourceDiffRows.length > 0 ? (
+                <>
+                  <div className="diff-compare-head">
+                    <div className="diff-compare-head-side">Before</div>
+                    <div className="diff-compare-head-side">After</div>
                   </div>
-                ))
+                  {resourceDiffRows.map((row, index) => (
+                  <div
+                    key={`${row.left?.type ?? 'empty'}-${row.right?.type ?? 'empty'}-${index}-${row.left?.leftNumber ?? 0}-${row.right?.rightNumber ?? 0}`}
+                    className="diff-compare-row"
+                  >
+                    <div
+                      className={`diff-side diff-side-before${
+                        row.left?.type === 'removed' ? ' is-removed' : ''
+                      }${!row.left ? ' is-empty' : ''}`}
+                    >
+                      <span className="diff-gutter">{row.left?.leftNumber ?? ''}</span>
+                      <span className="diff-marker">{row.left ? '-' : ''}</span>
+                      <span className="diff-content">{row.left?.content || ' '}</span>
+                    </div>
+                    <div
+                      className={`diff-side diff-side-after${
+                        row.right?.type === 'added' ? ' is-added' : ''
+                      }${!row.right ? ' is-empty' : ''}`}
+                    >
+                      <span className="diff-gutter">{row.right?.rightNumber ?? ''}</span>
+                      <span className="diff-marker">{row.right ? '+' : ''}</span>
+                      <span className="diff-content">{row.right?.content || ' '}</span>
+                    </div>
+                  </div>
+                ))}
+                </>
+              ) : resourceDraft === resourceBaselineDraft ? (
+                <Empty description="当前没有差异" />
               ) : (
-                <Empty description="当前没有可展示的差异" />
+                <Empty description="当前没有可展示的变更行" />
               )}
             </div>
           </div>
@@ -9227,22 +10317,22 @@ function Workspace() {
             <Alert
               type="info"
               showIcon
-              message="审计视图用于快速判断影响面"
-              description="这里看元信息、managedFields 和草稿解析结果。"
+              message="审计视图用于快速判断对象身份和变更影响"
+              description="这里保留对象摘要、变更规模和字段托管来源，不再展开系统级 managedFields 细节。"
               style={{ marginBottom: 16 }}
             />
             <div className="audit-mini-grid">
               <div className="audit-mini-card">
-                <span>Kind</span>
+                <span>对象类型</span>
                 <strong>{resourceAuditTarget?.kind || '-'}</strong>
               </div>
               <div className="audit-mini-card">
-                <span>Generation</span>
-                <strong>{String(resourceAuditTarget?.metadata?.generation ?? '-')}</strong>
+                <span>变更行数</span>
+                <strong>{resourceChangedDiffLines.length}</strong>
               </div>
               <div className="audit-mini-card">
-                <span>Managed Fields</span>
-                <strong>{resourceAuditTarget?.metadata?.managedFields?.length ?? 0}</strong>
+                <span>字段来源</span>
+                <strong>{resourceAuditOwnership.managerCount}</strong>
               </div>
             </div>
             <Descriptions column={2} size="small" className="audit-descriptions">
@@ -9252,11 +10342,13 @@ function Workspace() {
               <Descriptions.Item label="命名空间">
                 {resourceNamespace(resourceAuditTarget) || 'Cluster Scope'}
               </Descriptions.Item>
-              <Descriptions.Item label="UID">
-                {resourceAuditTarget?.metadata?.uid || '-'}
+              <Descriptions.Item label="创建时间">
+                {formatDate(resourceAuditTarget?.metadata?.creationTimestamp)}
               </Descriptions.Item>
-              <Descriptions.Item label="资源版本">
-                {resourceAuditTarget?.metadata?.resourceVersion || '-'}
+              <Descriptions.Item label="版本信息">
+                {`generation=${String(resourceAuditTarget?.metadata?.generation ?? '-')} · resourceVersion=${
+                  resourceAuditTarget?.metadata?.resourceVersion || '-'
+                }`}
               </Descriptions.Item>
             </Descriptions>
             <div className="audit-entry-list">
@@ -9905,6 +10997,30 @@ function buildResourceTemplate(
           },
         },
       }
+    case 'knativeservice':
+      return {
+        apiVersion: 'serving.knative.dev/v1',
+        kind: 'Service',
+        metadata,
+        spec: {
+          template: {
+            metadata: {
+              annotations: {
+                'autoscaling.knative.dev/min-scale': '0',
+                'autoscaling.knative.dev/max-scale': '5',
+              },
+            },
+            spec: {
+              containers: [
+                {
+                  image: 'gcr.io/knative-samples/helloworld-go',
+                  env: [{ name: 'TARGET', value: 'KubeFeel' }],
+                },
+              ],
+            },
+          },
+        },
+      }
     case 'service':
       return {
         apiVersion: 'v1',
@@ -10096,6 +11212,36 @@ function buildStandardResourceDocuments(
           },
         },
       ]
+    case 'knativeservice':
+      return [
+        {
+          apiVersion: 'serving.knative.dev/v1',
+          kind: 'Service',
+          metadata: {
+            name: 'sample-knative-service',
+            namespace: resolvedNamespace,
+          },
+          spec: {
+            template: {
+              metadata: {
+                annotations: {
+                  'autoscaling.knative.dev/class': 'kpa.autoscaling.knative.dev',
+                  'autoscaling.knative.dev/metric': 'concurrency',
+                  'autoscaling.knative.dev/target': '100',
+                },
+              },
+              spec: {
+                containers: [
+                  {
+                    image: 'gcr.io/knative-samples/helloworld-go',
+                    env: [{ name: 'TARGET', value: 'KubeFeel' }],
+                  },
+                ],
+              },
+            },
+          },
+        },
+      ]
     default:
       return [buildResourceTemplate(definition, namespace, 'standard')]
   }
@@ -10109,7 +11255,15 @@ function buildStandardResourceManifest(
 }
 
 function stringifyYamlDocuments(documents: K8sObject[]) {
-  return documents.map((document) => YAML.stringify(document)).join('---\n')
+  return documents.map((document) => YAML.stringify(sanitizeResourceForYaml(document))).join('---\n')
+}
+
+function sanitizeResourceForYaml(resource: K8sObject) {
+  const next = JSON.parse(JSON.stringify(resource)) as K8sObject
+  if (next.metadata) {
+    delete next.metadata.managedFields
+  }
+  return next
 }
 
 function clusterStatusColor(status: string) {
@@ -10519,6 +11673,33 @@ function resolveWorkloadStatus(
     }
   }
 
+  if (isKnativeServiceResource(resource)) {
+    const readyCondition = Array.isArray(readNestedValue(resource, ['status', 'conditions']))
+      ? ((readNestedValue(resource, ['status', 'conditions']) as Array<unknown>)
+          .map((entry) => asRecord(entry))
+          .find((entry) => valueAsString(entry?.type) === 'Ready') ?? null)
+      : null
+    const readyStatus = valueAsString(readyCondition?.status)
+
+    if (readyStatus === 'True') {
+      return {
+        label: 'Ready / Scaled to Zero',
+        tone: 'success' as const,
+      }
+    }
+    if (readyStatus === 'Unknown') {
+      return {
+        label: 'Revision 准备中',
+        tone: 'processing' as const,
+      }
+    }
+
+    return {
+      label: valueAsString(readyCondition?.reason) || '未就绪',
+      tone: 'warning' as const,
+    }
+  }
+
   const readyCount =
     readNumberValue(resource, ['status', 'readyReplicas']) ??
     readNumberValue(resource, ['status', 'availableReplicas']) ??
@@ -10541,6 +11722,10 @@ function resolveWorkloadStatus(
 function resolveWorkloadPolicy(resource: K8sObject | null, deploymentInsight: DeploymentInsight | null) {
   if (deploymentInsight) {
     return deploymentInsight.strategyType
+  }
+
+  if (isKnativeServiceResource(resource)) {
+    return 'Knative 请求型驱动'
   }
 
   if (valueAsString(resource?.kind) === 'StatefulSet') {
@@ -10569,6 +11754,11 @@ function resolveWorkloadReplicaSummary(
 ) {
   if (deploymentInsight) {
     return `${deploymentInsight.ready}/${deploymentInsight.desired}`
+  }
+
+  if (isKnativeServiceResource(resource)) {
+    const runningCount = pods.filter((pod) => pod.phase === 'Running').length
+    return `${runningCount}/${pods.length}`
   }
 
   const desiredCount = readNumberValue(resource, ['spec', 'replicas']) ?? pods.length
@@ -10612,13 +11802,13 @@ function buildResourceContainerDetails(resource: K8sObject | null): ResourceCont
 }
 
 function supportsPodOperations(resourceType?: string | null) {
-  return ['deployment', 'statefulset', 'daemonset', 'job', 'cronjob'].includes(
+  return ['deployment', 'statefulset', 'daemonset', 'job', 'cronjob', 'knativeservice'].includes(
     resourceType || '',
   )
 }
 
 function supportsWorkloadRelations(resourceType?: string | null) {
-  return supportsPodOperations(resourceType)
+  return ['deployment', 'statefulset', 'daemonset', 'job', 'cronjob'].includes(resourceType || '')
 }
 
 function supportsWorkloadHistory(resourceType?: string | null) {
@@ -10710,6 +11900,94 @@ function classifyPodLogLine(content: string) {
   return 'default'
 }
 
+function formatMetadataValue(value: string) {
+  const normalized = value.trim()
+  if (!normalized) {
+    return value
+  }
+
+  if (
+    (normalized.startsWith('{') && normalized.endsWith('}')) ||
+    (normalized.startsWith('[') && normalized.endsWith(']'))
+  ) {
+    try {
+      return JSON.stringify(JSON.parse(normalized), null, 2)
+    } catch {
+      return value
+    }
+  }
+
+  return value
+}
+
+function shouldExpandMetadataValue(value: string) {
+  return value.length > 160 || value.includes('\n')
+}
+
+function extractPercentValue(value?: string) {
+  if (!value) {
+    return undefined
+  }
+  const match = value.match(/(\d+)/)
+  if (!match) {
+    return undefined
+  }
+  return Number(match[1])
+}
+
+function summarizeManagedFields(
+  fields: Array<{
+    manager?: string
+    operation?: string
+    apiVersion?: string
+    time?: string
+    subresource?: string
+  }>,
+) {
+  const managers = Array.from(
+    new Set(fields.map((field) => field.manager?.trim()).filter(Boolean) as string[]),
+  )
+  const latestField = [...fields]
+    .filter((field) => field.time)
+    .sort((left, right) => parseDateValue(right.time) - parseDateValue(left.time))[0]
+
+  return {
+    managerCount: managers.length,
+    managerLabels: managers.slice(0, 3).join('、') || '未知来源',
+    latestManager: latestField?.manager || '',
+    latestTime: latestField?.time,
+    latestOperationLabel: latestField?.operation ? managedFieldOperationLabel(latestField.operation) : '更新',
+  }
+}
+
+function managedFieldOperationLabel(operation: string) {
+  switch (operation.toLowerCase()) {
+    case 'apply':
+      return '执行 Apply'
+    case 'update':
+      return '执行 Update'
+    default:
+      return `执行 ${operation}`
+  }
+}
+
+function supportsWorkloadAutoscaling(resourceType?: string | null) {
+  return resourceType === 'deployment' || resourceType === 'statefulset' || resourceType === 'knativeservice'
+}
+
+function formatTriggerMetadata(metadata?: Record<string, string>) {
+  if (!metadata || Object.keys(metadata).length === 0) {
+    return '-'
+  }
+  return Object.entries(metadata)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' · ')
+}
+
+function isKnativeServiceResource(resource: K8sObject | null) {
+  return valueAsString(resource?.apiVersion) === 'serving.knative.dev/v1' && valueAsString(resource?.kind) === 'Service'
+}
+
 function podTerminalStatusLabel(status: PodTerminalStatus) {
   switch (status) {
     case 'connecting':
@@ -10798,7 +12076,7 @@ function renderExtraContainerSummary(resource: K8sObject) {
 }
 
 function sanitizeResourceForCreate(resource: K8sObject) {
-  const next = JSON.parse(JSON.stringify(resource)) as K8sObject
+  const next = sanitizeResourceForYaml(resource)
 
   if (!next.metadata) {
     next.metadata = {}
@@ -10808,8 +12086,6 @@ function sanitizeResourceForCreate(resource: K8sObject) {
   delete next.metadata.uid
   delete next.metadata.resourceVersion
   delete next.metadata.creationTimestamp
-
-  delete (next.metadata as Record<string, unknown>).managedFields
   delete (next.metadata as Record<string, unknown>).generation
   delete (next.metadata as Record<string, unknown>).ownerReferences
   delete (next as Record<string, unknown>).status
@@ -10951,6 +12227,41 @@ function summarizeYamlDiff(lines: YamlDiffLine[]) {
   )
 }
 
+function buildYamlDiffRows(lines: YamlDiffLine[]) {
+  const rows: YamlDiffRow[] = []
+  let pendingRemoved: YamlDiffLine[] = []
+  let pendingAdded: YamlDiffLine[] = []
+
+  const flushPending = () => {
+    const maxLength = Math.max(pendingRemoved.length, pendingAdded.length)
+    for (let index = 0; index < maxLength; index += 1) {
+      rows.push({
+        left: pendingRemoved[index],
+        right: pendingAdded[index],
+      })
+    }
+    pendingRemoved = []
+    pendingAdded = []
+  }
+
+  lines.forEach((line) => {
+    if (line.type === 'unchanged') {
+      flushPending()
+      return
+    }
+
+    if (line.type === 'removed') {
+      pendingRemoved.push(line)
+      return
+    }
+
+    pendingAdded.push(line)
+  })
+
+  flushPending()
+  return rows
+}
+
 function normalizeYamlLines(value: string) {
   return value.replace(/\r\n/g, '\n').split('\n')
 }
@@ -10958,8 +12269,11 @@ function normalizeYamlLines(value: string) {
 function buildResourceAuditEntries(
   liveResource: K8sObject | null,
   draftResource: K8sObject | null,
+  draftResources: K8sObject[],
+  diffSummary: { added: number; removed: number; unchanged: number },
 ): AuditEntry[] {
   const entries: AuditEntry[] = []
+  const ownership = summarizeManagedFields(liveResource?.metadata?.managedFields ?? [])
 
   if (liveResource?.metadata?.creationTimestamp) {
     entries.push({
@@ -10970,17 +12284,21 @@ function buildResourceAuditEntries(
     })
   }
 
-  for (const field of liveResource?.metadata?.managedFields ?? []) {
+  if (diffSummary.added > 0 || diffSummary.removed > 0) {
     entries.push({
-      title: field.manager ? `Managed by ${field.manager}` : 'Managed Field',
-      detail: [
-        field.operation ? `operation=${field.operation}` : '',
-        field.apiVersion ? `apiVersion=${field.apiVersion}` : '',
-        field.subresource ? `subresource=${field.subresource}` : '',
-      ]
-        .filter(Boolean)
-        .join(' · '),
-      time: field.time,
+      title: '变更规模',
+      detail: `本次草稿新增 ${diffSummary.added} 行、删除 ${diffSummary.removed} 行，共涉及 ${draftResources.length} 个对象。`,
+      accent: 'info',
+    })
+  }
+
+  if (ownership.managerCount > 0) {
+    entries.push({
+      title: '字段托管来源',
+      detail: ownership.latestManager
+        ? `当前对象由 ${ownership.managerLabels} 等 ${ownership.managerCount} 个来源维护，最近一次由 ${ownership.latestManager} ${ownership.latestOperationLabel}。`
+        : `当前对象由 ${ownership.managerLabels} 等 ${ownership.managerCount} 个来源维护。`,
+      time: ownership.latestTime,
       accent: 'info',
     })
   }
@@ -10988,15 +12306,22 @@ function buildResourceAuditEntries(
   if (draftResource) {
     entries.push({
       title: '当前草稿解析',
-      detail: `${draftResource.apiVersion || '-'} / ${draftResource.kind || '-'} / ${resourceName(draftResource)}`,
+      detail: `${draftResource.apiVersion || '-'} / ${draftResource.kind || '-'} / ${resourceName(draftResource)}${
+        draftResources.length > 1 ? `，包含 ${draftResources.length} 份对象文档` : ''
+      }`,
       accent: 'neutral',
     })
   }
 
-  if (liveResource?.metadata?.resourceVersion) {
+  if (
+    liveResource?.metadata?.resourceVersion ||
+    liveResource?.metadata?.generation !== undefined
+  ) {
     entries.push({
       title: '资源版本',
-      detail: `resourceVersion=${liveResource.metadata.resourceVersion}，用于标记当前对象在 API Server 中的版本快照。`,
+      detail: `generation=${String(liveResource?.metadata?.generation ?? '-')} · resourceVersion=${
+        liveResource?.metadata?.resourceVersion || '-'
+      }`,
       accent: 'neutral',
     })
   }

@@ -1344,6 +1344,71 @@
   border: 1px solid rgba(16, 32, 43, 0.06);
 }
 
+.metadata-pair-grid,
+.metadata-entry-list {
+  display: grid;
+  gap: 12px;
+}
+
+.metadata-pair-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.metadata-pair-card,
+.metadata-entry-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(16, 32, 43, 0.06);
+  background: #f6fafc;
+}
+
+.metadata-pair-key,
+.metadata-entry-key {
+  color: #627883;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.metadata-pair-value {
+  color: #10202b;
+  font-size: 0.94rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.metadata-entry-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.metadata-entry-value {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #ffffff;
+  border: 1px solid rgba(16, 32, 43, 0.06);
+  color: #31424f;
+  font-size: 0.84rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.metadata-entry-value.is-collapsed {
+  max-height: 108px;
+  overflow: hidden;
+}
+
+.metadata-entry-value.is-expanded {
+  max-height: none;
+}
+
 .resource-relation-summary {
   display: flex;
   align-items: center;
@@ -1396,6 +1461,72 @@
   align-items: center;
   gap: 12px;
   padding: 16px 0;
+}
+
+.autoscaling-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.autoscaling-panel {
+  display: grid;
+  gap: 16px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  background: #ffffff;
+  border: 1px solid rgba(16, 32, 43, 0.06);
+}
+
+.autoscaling-panel-stack,
+.autoscaling-metric-list,
+.autoscaling-trigger-list,
+.autoscaling-modal-shell {
+  display: grid;
+  gap: 14px;
+}
+
+.autoscaling-summary-grid,
+.autoscaling-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.autoscaling-summary-card,
+.autoscaling-metric-card,
+.autoscaling-trigger-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(16, 32, 43, 0.06);
+  background: #f6fafc;
+}
+
+.autoscaling-summary-card span,
+.autoscaling-metric-card span,
+.autoscaling-trigger-card span {
+  color: #627883;
+  font-size: 0.84rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.autoscaling-summary-card strong,
+.autoscaling-metric-card strong,
+.autoscaling-trigger-card strong {
+  color: #10202b;
+  font-size: 0.95rem;
+  word-break: break-word;
+}
+
+.autoscaling-modal-aside {
+  align-self: start;
+}
+
+.autoscaling-trigger-editor textarea {
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
 }
 
 .pod-ops-table .ant-table {
@@ -2411,28 +2542,55 @@
   background: #fbfcfd;
 }
 
-.diff-line {
+.diff-compare-head,
+.diff-compare-row {
   display: grid;
-  grid-template-columns: 56px 56px 24px minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.diff-compare-head {
+  border-bottom: 1px solid rgba(16, 32, 43, 0.06);
+  background: #f3f7f9;
+}
+
+.diff-compare-head-side {
+  padding: 10px 14px;
+  color: #627883;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.diff-compare-head-side + .diff-compare-head-side {
+  border-left: 1px solid rgba(16, 32, 43, 0.06);
+}
+
+.diff-compare-row + .diff-compare-row {
+  border-top: 1px solid rgba(16, 32, 43, 0.04);
+}
+
+.diff-side {
+  display: grid;
+  grid-template-columns: 56px 24px minmax(0, 1fr);
   font-family: 'IBM Plex Mono', 'SFMono-Regular', monospace;
   font-size: 0.84rem;
   line-height: 1.55;
 }
 
-.diff-line + .diff-line {
-  border-top: 1px solid rgba(16, 32, 43, 0.04);
+.diff-side + .diff-side {
+  border-left: 1px solid rgba(16, 32, 43, 0.04);
 }
 
-.diff-line-added {
-  background: rgba(33, 186, 69, 0.08);
-}
-
-.diff-line-removed {
+.diff-side-before.is-removed {
   background: rgba(245, 34, 45, 0.08);
 }
 
-.diff-line-unchanged {
-  background: #fbfcfd;
+.diff-side-after.is-added {
+  background: rgba(33, 186, 69, 0.08);
+}
+
+.diff-side.is-empty {
+  background: rgba(16, 32, 43, 0.02);
 }
 
 .diff-gutter,
@@ -2448,7 +2606,7 @@
 }
 
 .diff-content {
-  padding: 8px 12px;
+  padding: 8px 12px 8px 0;
   white-space: pre-wrap;
   word-break: break-word;
   color: #10202b;

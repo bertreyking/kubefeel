@@ -446,6 +446,71 @@ export type WorkloadHistory = {
   items: WorkloadHistoryItem[]
 }
 
+export type AutoscalingMetricSnapshot = {
+  label: string
+  current?: string
+  target?: string
+}
+
+export type MetricsAutoscalingStatus = {
+  supported: boolean
+  configured: boolean
+  name?: string
+  minReplicas: number
+  maxReplicas: number
+  currentReplicas: number
+  desiredReplicas: number
+  metrics: AutoscalingMetricSnapshot[]
+  lastScaleTime?: string
+}
+
+export type AutoscalingTriggerSnapshot = {
+  type: string
+  metadata?: Record<string, string>
+}
+
+export type EventAutoscalingStatus = {
+  supported: boolean
+  available: boolean
+  configured: boolean
+  name?: string
+  minReplicaCount: number
+  maxReplicaCount: number
+  pollingInterval: number
+  cooldownPeriod: number
+  triggers: AutoscalingTriggerSnapshot[]
+  lastActiveTime?: string
+  originalReplicas: number
+}
+
+export type APIAutoscalingStatus = {
+  supported: boolean
+  available: boolean
+  configured: boolean
+  name?: string
+  class?: string
+  metric?: string
+  target?: string
+  targetUtilizationPercentage: number
+  minScale: number
+  maxScale: number
+  scaleDownDelay?: string
+  window?: string
+  scaleToZeroRetention?: string
+  url?: string
+  latestReadyRevision?: string
+}
+
+export type WorkloadAutoscaling = {
+  supported: boolean
+  resourceType: string
+  kind: string
+  message?: string
+  metrics: MetricsAutoscalingStatus
+  event: EventAutoscalingStatus
+  api: APIAutoscalingStatus
+}
+
 export type PodLogsResult = {
   pod: string
   namespace: string

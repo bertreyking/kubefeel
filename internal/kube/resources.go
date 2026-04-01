@@ -17,6 +17,7 @@ var resourceCatalog = []ResourceDefinition{
 	{Key: "daemonset", Label: "DaemonSets", Kind: "DaemonSet", APIVersion: "apps/v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}},
 	{Key: "cronjob", Label: "CronJobs", Kind: "CronJob", APIVersion: "batch/v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "cronjobs"}},
 	{Key: "job", Label: "Jobs", Kind: "Job", APIVersion: "batch/v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}},
+	{Key: "knativeservice", Label: "Knative Services", Kind: "Service", APIVersion: "serving.knative.dev/v1", Namespaced: true, GVR: schema.GroupVersionResource{Group: "serving.knative.dev", Version: "v1", Resource: "services"}},
 	{Key: "configmap", Label: "ConfigMaps", Kind: "ConfigMap", APIVersion: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}},
 	{Key: "secret", Label: "Secrets", Kind: "Secret", APIVersion: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "secrets"}},
 	{Key: "service", Label: "Services", Kind: "Service", APIVersion: "v1", Namespaced: true, GVR: schema.GroupVersionResource{Version: "v1", Resource: "services"}},
